@@ -363,6 +363,108 @@ def test_slack(s, monster):
     s.command("U1", "drop 2")  # leave Monster demand-free for later tests
 
 
+def test_daily(s):
+    """AC4 + renewals on a fresh server. ADMIN_SLACK_IDS=UA,UB."""
+    f = s.fake
+    D = dt.date(2026, 11, 20)
+    day = dt.timedelta(days=1)
+
+    bodies = {}  # channel -> last chat.postMessage body
+
+    def run(today, status=200):
+        f.take()
+        st, b = s.call("POST", "/jobs/daily", b"", today=today)
+        check(st == status, f"daily {today} status {st} {b}")
+        sent = [r["body"] for r in f.take("/api/chat.postMessage")]
+        bodies.update({m["channel"]: m for m in sent})
+        check(b == {"sent": len(sent) - (status != 200), "failed": int(status != 200)}, f"daily counts {b}")
+        return [(m["channel"], m["text"]) for m in sent]
+
+    def boleto(supplier, amount, due, today, linha="não informada"):
+        n = (due - today).days
+        when = (f"em {n} dias" if n > 1 else "amanhã" if n == 1 else "hoje" if n == 0
+                else "vencido há 1 dia" if n == -1 else f"vencido há {-n} dias")
+        return f"Boleto {supplier} · {amount} · vence {due.isoformat()} ({when}) · Linha digitável: {linha}"
+
+    def to_admins(text):
+        return sorted([("UA", text), ("UB", text)])
+
+    jid = s.call("POST", "/api/orders", JUNTOS, today=TODAY)[1]["id"]
+    s.call("POST", f"/api/orders/{jid}", {"due_date": D.isoformat()})
+    items = s.call("GET", "/api/items")[1]
+    monster = next(i["id"] for i in items if i["name"] == "Monster Energy")
+    ultra = next(i["id"] for i in items if i["name"] == "Monster Ultra")
+    s.submit("U5", monster)                     # expires 11-23
+    s.submit("U7", ultra)                       # archived below -> no renewal DMs
+    s.call("POST", f"/api/items/{ultra}", {"active": False})
+    exp = next_boundary_after(TODAY)
+    renew_text = f"Sua preferência Monster Energy 1x/dia expira em {exp}. Renovar para o próximo ciclo?"
+
+    # D-4 .. D+2: none, d3, none, d1, d0, overdue, overdue (to UA and UB); renewals to U5 on 11-20 and 11-22
+    expect_boleto = {-4: None, -3: "x", -2: None, -1: "x", 0: "x", 1: "x", 2: "x"}
+    expect_renew = {dt.date(2026, 11, 20): True, dt.date(2026, 11, 22): True}
+    for off, want in expect_boleto.items():
+        today = D + dt.timedelta(days=off)
+        msgs = run(today)
+        admin = sorted(m for m in msgs if m[0] in ("UA", "UB"))
+        exp_admin = to_admins(boleto("JUNTOS", "R$ 1007.72", D, today)) if want else []
+        check(admin == exp_admin, f"AC4 sequence {today}: {admin}")
+        renewals = [m for m in msgs if m[0] == "U5"]
+        check(renewals == ([("U5", renew_text)] if today in expect_renew else []), f"renewal {today}: {renewals}")
+        check(not any(m[0] == "U7" for m in msgs), "no renewal for archived item")
+    check(run(D + 2 * day) == [], "AC4 dedup: second run same day sends nothing")
+
+    # Renovar button on the last renewal DM renews U5's preference
+    button = bodies["U5"]["blocks"][1]["elements"][0]
+    check(button["action_id"] == "renew" and bodies["U5"]["blocks"][0]["text"]["text"] == renew_text, "DM button")
+    payload = {"type": "block_actions", "user": {"id": "U5"}, "response_url": f.base + "/response",
+               "actions": [{"action_id": "renew", "value": button["value"]}]}
+    f.take()
+    s.slack("/slack/interactions", {"payload": json.dumps(payload)}, today=dt.date(2026, 11, 22))
+    sent = f.take("/response")
+    check(len(sent) == 1 and sent[0]["body"]["text"] == "Renovada: Monster Energy 1x/dia até 2026-12-07",
+          f"renew from DM {sent}")
+
+    # backfill + re-arm: fresh BEES due 11-27, first run 11-25 (D'-2) -> d3; JUNTOS moved to 11-28 -> d3 again
+    bid = s.call("POST", "/api/orders", BEES, today=TODAY)[1]["id"]
+    s.call("POST", f"/api/orders/{bid}", {"due_date": "2026-11-27", "linha_digitavel": "2399.1234 5"})
+    s.call("POST", f"/api/orders/{jid}", {"due_date": "2026-11-28"})
+    t = dt.date(2026, 11, 25)
+    msgs = sorted(m for m in run(t) if m[0] in ("UA", "UB"))
+    want = sorted(to_admins(boleto("BEES", "R$ 602.41", dt.date(2026, 11, 27), t, "2399.1234 5")) +
+                  to_admins(boleto("JUNTOS", "R$ 1007.72", dt.date(2026, 11, 28), t)))
+    check(msgs == want, f"AC4 backfill d3 + re-arm: {msgs}")
+
+    # partial failure: UB fails once -> 500, retry sends only UB
+    f.fail_dm_once = {"UB"}
+    t = dt.date(2026, 11, 26)
+    d1 = boleto("BEES", "R$ 602.41", dt.date(2026, 11, 27), t, "2399.1234 5")
+    check(sorted(run(t, status=500)) == to_admins(d1), "partial failure attempts both")
+    check(run(t) == [("UB", d1)], "retry sends only UB")
+
+    # paid stops boleto DMs; unpaid without due date is nagged daily; paid without due date is not
+    s.call("POST", f"/api/orders/{bid}", {"paid_on": "2026-11-26"})
+    nodue = dict(json.loads(JUNTOS), orderId="nodue-1")
+    nid = s.call("POST", "/api/orders", json.dumps(nodue).encode(), today=TODAY)[1]["id"]
+    paid = dict(json.loads(JUNTOS), orderId="nodue-paid")
+    pid = s.call("POST", "/api/orders", json.dumps(paid).encode(), today=TODAY)[1]["id"]
+    s.call("POST", f"/api/orders/{pid}", {"paid_on": "2026-11-26"})
+    nag = "Pedido JUNTOS nodue-1 (R$ 1007.72) sem data de vencimento. Defina no TUI."
+    for t in (dt.date(2026, 11, 27), dt.date(2026, 11, 28)):
+        msgs = run(t)
+        check(not any("BEES" in m[1] for m in msgs), f"paid order gets no DMs {t}")
+        check(sorted(m for m in msgs if "sem data" in m[1]) == to_admins(nag), f"no-due nag {t}: {msgs}")
+
+    # renewals backfill: pref expiring 12-07 (created 11-23); Friday 12-04 skipped -> Saturday sends renew72
+    s.submit("U6", monster, today=dt.date(2026, 11, 23))
+    r6 = lambda t: [m[1] for m in run(t) if m[0] == "U6"]
+    text6 = "Sua preferência Monster Energy 1x/dia expira em 2026-12-07. Renovar para o próximo ciclo?"
+    check(r6(dt.date(2026, 12, 3)) == [], "renew72 not yet at n=4")
+    check(r6(dt.date(2026, 12, 5)) == [text6], "renew72 backfilled on Saturday")
+    check(r6(dt.date(2026, 12, 6)) == [text6], "renew24 Sunday")
+    check(r6(dt.date(2026, 12, 7)) == [], "renew24 once per cycle")
+
+
 def main():
     s = Server(FakeSlack())
     try:
@@ -373,6 +475,11 @@ def main():
         monster = test_items(s)
         test_slack(s, monster)
         test_cycles(s, jid, bid)
+    finally:
+        s.stop()
+    s = Server(s.fake)
+    try:
+        test_daily(s)
     finally:
         s.stop()
     if failures:

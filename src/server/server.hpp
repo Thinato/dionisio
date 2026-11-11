@@ -17,6 +17,7 @@ using json = nlohmann::json;
 
 // main.cpp
 std::string env(const char* key, const char* def = "");
+std::string trim(const std::string& s);
 extern Date g_anchor;  // CYCLE_ANCHOR
 Date today_of(const httplib::Request& req);  // ?today= only when ALLOW_TODAY_OVERRIDE=1
 void reply(httplib::Response& res, int status, const json& body);
@@ -53,4 +54,4 @@ bool persist();      // called with g_mu held, after a mut route changed the DB.
 // slack.cpp. Slack HTTP calls never run under g_mu.
 void slack_commands(const httplib::Request& req, httplib::Response& res);      // POST /slack/commands
 void slack_interactions(const httplib::Request& req, httplib::Response& res);  // POST /slack/interactions
-bool slack_dm(const std::string& user, const std::string& text, const json& blocks = nullptr);
+bool slack_dm(const std::string& user, const std::string& text, int64_t renew_pref = 0);  // >0 adds a Renovar button

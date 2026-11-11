@@ -61,15 +61,24 @@ static json slack_api(const std::string& method, const json& payload) {
   return r;
 }
 
-bool slack_dm(const std::string& user, const std::string& text, const json& blocks) {
-  json p = {{"channel", user}, {"text", text}};
-  if (!blocks.is_null()) p["blocks"] = blocks;
-  return slack_api("chat.postMessage", p).value("ok", false);
+static std::string escape(const std::string& s) {  // Slack mrkdwn control characters
+  std::string out;
+  for (char c : s) out += c == '&' ? "&amp;" : c == '<' ? "&lt;" : c == '>' ? "&gt;" : std::string(1, c);
+  return out;
 }
 
-static std::string trim(const std::string& s) {
-  auto b = s.find_first_not_of(" \t\r\n"), e = s.find_last_not_of(" \t\r\n");
-  return b == std::string::npos ? "" : s.substr(b, e - b + 1);
+bool slack_dm(const std::string& user, const std::string& text, int64_t renew_pref) {
+  json p = {{"channel", user}, {"text", escape(text)}};
+  if (renew_pref > 0) {
+    json button = {{"type", "button"},
+                   {"action_id", "renew"},
+                   {"style", "primary"},
+                   {"text", {{"type", "plain_text"}, {"text", "Renovar"}}},
+                   {"value", std::to_string(renew_pref)}};
+    json section = {{"type", "section"}, {"text", {{"type", "plain_text"}, {"text", text}}}};
+    p["blocks"] = json::array({section, {{"type", "actions"}, {"elements", json::array({button})}}});
+  }
+  return slack_api("chat.postMessage", p).value("ok", false);
 }
 
 // First n UTF-8 code points (Slack limits count characters).
@@ -78,12 +87,6 @@ static std::string utf8_prefix(const std::string& s, size_t n) {
   for (; i < s.size(); ++i)
     if (((unsigned char)s[i] & 0xC0) != 0x80 && cps++ == n) break;
   return s.substr(0, i);
-}
-
-static std::string escape(const std::string& s) {  // Slack mrkdwn control characters
-  std::string out;
-  for (char c : s) out += c == '&' ? "&amp;" : c == '<' ? "&lt;" : c == '>' ? "&gt;" : std::string(1, c);
-  return out;
 }
 
 static json opt(const std::string& text, const std::string& value) {

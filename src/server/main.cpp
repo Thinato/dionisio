@@ -2,9 +2,11 @@
 #include <httplib.h>
 #include <openssl/crypto.h>
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
+#include <sstream>
 
 #include "server.hpp"
 
@@ -16,6 +18,11 @@ Date g_anchor = kAnchor;
 std::string env(const char* key, const char* def) {
   const char* v = std::getenv(key);
   return v && *v ? v : def;
+}
+
+std::string trim(const std::string& s) {
+  auto b = s.find_first_not_of(" \t\r\n"), e = s.find_last_not_of(" \t\r\n");
+  return b == std::string::npos ? "" : s.substr(b, e - b + 1);
 }
 
 void reply(Response& res, int status, const json& body) {
@@ -154,6 +161,68 @@ static void post_item(const Request& req, Response& res) {
   reply(res, out.first, out.second);
 }
 
+// Daily 09:00 job: collect (under lock) -> send (no lock) -> record (under lock). Any failed send -> 500 so
+// Scheduler retries; the notifications PK dedups what already went out.
+static void daily(const Request& req, Response& res) {
+  static std::atomic<bool> running{false};
+  if (running.exchange(true)) return reply(res, 409, {{"error", "already running"}});
+  struct Done { ~Done() { running = false; } } done;
+  struct Dm { std::string kind, key, target, text; int64_t ref, renew; };
+  Date today = today_of(req);
+  std::vector<std::string> admins;
+  std::stringstream ids(env("ADMIN_SLACK_IDS"));
+  for (std::string id; std::getline(ids, id, ',');)
+    if (std::string t = trim(id); !t.empty()) admins.push_back(t);
+
+  auto todo = db([&] {
+    std::vector<Dm> out;
+    auto add = [&](Dm dm) {
+      if (q("SELECT 1 FROM notifications WHERE kind = ? AND ref_id = ? AND on_date = ? AND target = ?",
+            {dm.kind, dm.ref, dm.key, dm.target}).empty())
+        out.push_back(std::move(dm));
+    };
+    for (auto& r : q("SELECT id FROM orders WHERE paid_on IS NULL ORDER BY id")) {
+      json o = order_json(r["id"], today, false);
+      const json& b = o["boleto"];
+      int64_t amount = b["amount_due_cents"];
+      auto due = b["due_date"].is_string() ? parse_date(b["due_date"].get<std::string>()) : std::nullopt;
+      for (auto& admin : admins) {
+        if (!due)
+          add({"no_due_date", iso(today), admin, no_due_date_dm(o["supplier"].get<std::string>(),
+                                                                o["external_id"].get<std::string>(), amount),
+               o["id"], 0});
+        else if (auto a = boleto_alert(*due, today))
+          add({a->kind, iso(a->key), admin,
+               boleto_dm(o["supplier"].get<std::string>(), amount, *due, today,
+                         b["linha_digitavel"].is_string() ? b["linha_digitavel"].get<std::string>() : ""),
+               o["id"], 0});
+      }
+    }
+    for (auto& p : q("SELECT p.id, p.slack_user_id, p.count, p.period, p.expires_on, "
+                     "COALESCE(i.name, p.other_text) AS name FROM preferences p LEFT JOIN items i ON i.id = p.item_id "
+                     "WHERE p.expires_on >= ? AND (p.item_id IS NULL OR i.active = 1) ORDER BY p.id",
+                     {iso(today)})) {
+      auto exp = parse_date(p["expires_on"].get<std::string>());
+      if (auto a = exp ? renewal_alert(*exp, today) : std::nullopt)
+        add({a->kind, iso(a->key), p["slack_user_id"],
+             renewal_dm(p["name"].get<std::string>(), p["count"], p["period"].get<std::string>(), *exp), p["id"],
+             p["id"]});
+    }
+    return out;
+  });
+
+  std::vector<const Dm*> sent;
+  for (auto& dm : todo)
+    if (slack_dm(dm.target, dm.text, dm.renew)) sent.push_back(&dm);
+  db([&] {
+    for (auto* dm : sent)
+      q("INSERT OR IGNORE INTO notifications (kind, ref_id, on_date, target) VALUES (?, ?, ?, ?)",
+        {dm->kind, dm->ref, dm->key, dm->target});
+  });
+  int failed = (int)(todo.size() - sent.size());
+  reply(res, failed ? 500 : 200, {{"sent", sent.size()}, {"failed", failed}});
+}
+
 int main() {
   curl_global_init(CURL_GLOBAL_DEFAULT);
   std::setvbuf(stdout, nullptr, _IOLBF, 0);
@@ -202,6 +271,7 @@ int main() {
   svr.Get("/api/requests", [](const Request& req, Response& res) {
     reply(res, 200, db([&] { return requests_json(today_of(req)); }));
   });
+  svr.Post("/jobs/daily", mut(daily));
   svr.Post("/slack/commands", mut(slack_commands));
   svr.Post("/slack/interactions", mut(slack_interactions));
   svr.Get("/api/cycles", [](const Request& req, Response& res) {
