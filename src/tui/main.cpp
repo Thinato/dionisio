@@ -1,6 +1,4 @@
 // Dionisio admin TUI: talks only to the server's /api over HTTP (libcurl).
-#include <curl/curl.h>
-
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -17,35 +15,12 @@
 using json = nlohmann::json;
 using namespace ftxui;
 
-struct Resp { long code = 0; std::string body; };
-
+using Resp = HttpResp;
 static std::string g_url, g_token;
 
-static size_t sink(char* p, size_t s, size_t n, void* u) {
-  static_cast<std::string*>(u)->append(p, s * n);
-  return s * n;
-}
-
 static Resp call(const std::string& path, const std::string* body = nullptr) {
-  Resp r;
-  CURL* c = curl_easy_init();
-  curl_slist* h = curl_slist_append(nullptr, ("Authorization: Bearer " + g_token).c_str());
-  h = curl_slist_append(h, "Content-Type: application/json");
-  curl_easy_setopt(c, CURLOPT_URL, (g_url + path).c_str());
-  curl_easy_setopt(c, CURLOPT_HTTPHEADER, h);
-  curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, sink);
-  curl_easy_setopt(c, CURLOPT_WRITEDATA, &r.body);
-  curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);  // cold start on Cloud Run
-  if (body) {
-    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body->c_str());
-    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)body->size());
-  }
-  CURLcode rc = curl_easy_perform(c);
-  if (rc == CURLE_OK) curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &r.code);
-  else r.body = curl_easy_strerror(rc);
-  curl_slist_free_all(h);
-  curl_easy_cleanup(c);
-  return r;
+  // 30 s: Cloud Run cold start
+  return http(body ? "POST" : "GET", g_url + path, {"Authorization: Bearer " + g_token, "Content-Type: application/json"}, body ? *body : "", 30000);
 }
 
 static std::string slurp(const std::string& f) {
@@ -59,11 +34,11 @@ static int do_import(const std::string& file) {
   std::string raw = slurp(file);
   if (raw.empty()) { puts("error: cannot read file"); return 1; }
   Resp r = call("/api/orders", &raw);
-  if (r.code == 201) printf("created: order %d\n", json::parse(r.body, nullptr, false).value("id", 0));
-  else if (r.code == 409) puts("rejected: already imported");
-  else if (r.code == 400) puts("rejected: unknown export format");
-  else { printf("error: HTTP %ld %s\n", r.code, r.body.c_str()); return 1; }
-  return r.code == 201 ? 0 : 2;
+  if (r.status == 201) printf("created: order %d\n", json::parse(r.body, nullptr, false).value("id", 0));
+  else if (r.status == 409) puts("rejected: already imported");
+  else if (r.status == 400) puts("rejected: unknown export format");
+  else { printf("error: HTTP %ld %s\n", r.status, r.body.c_str()); return 1; }
+  return r.status == 201 ? 0 : 2;
 }
 
 static const char* kTabs[] = {"Home", "Order", "Catalogue", "New items", "Past cycles"};
@@ -82,11 +57,16 @@ struct Tui {
   std::string prompt, buf;
   std::function<void(const std::string&)> on_commit;
 
+  void setdate(const char* k, const std::string& v) {
+    if (!v.empty() && !parse_date(v)) { status_err = true; status = "invalid date (YYYY-MM-DD)"; return; }
+    fields[k] = v.empty() ? json(nullptr) : json(v);
+  }
+
   bool unsaved() const { return !dirty.empty() || !fields.empty(); }
 
   json get(const std::string& path) {
     Resp r = call(path);
-    if (r.code != 200) {
+    if (r.status != 200) {
       fail(path, r);
       return nullptr;
     }
@@ -94,7 +74,7 @@ struct Tui {
   }
   void fail(const std::string& what, const Resp& r) {
     status_err = true;
-    std::string msg = r.code ? "HTTP " + std::to_string(r.code) : "network";
+    std::string msg = r.status ? "HTTP " + std::to_string(r.status) : "network";
     json j = json::parse(r.body, nullptr, false);
     std::string d = j.is_object() && j.contains("error") ? j["error"].dump() : r.body.substr(0, 80);
     status = what + ": " + msg + " " + d;
@@ -124,13 +104,9 @@ struct Tui {
   }
   // all pending -> order total, else sum of arrived price_cents
   long long amount() const {
-    long long sum = 0; bool any = false;
-    for (auto& l : order["lines"]) {
-      std::string a = arrival(l);
-      if (a != "pending") any = true;
-      if (a == "arrived") sum += l.value("price_cents", 0);
-    }
-    return any ? sum : (long long)order.value("total", 0);
+    std::vector<LineState> ls;
+    for (auto& l : order["lines"]) ls.push_back({l.value("price_cents", 0), arrival(l)});
+    return amount_due(order.value("total", 0), ls);
   }
 
   bool save() {
@@ -139,7 +115,7 @@ struct Tui {
     if (!dirty.empty()) for (auto& [id, a] : dirty) b["lines"][std::to_string(id)] = a;
     std::string s = b.dump();
     Resp r = call("/api/orders/" + std::to_string(order["id"].get<int>()), &s);
-    if (r.code / 100 != 2) { fail("save", r); return false; }
+    if (r.status / 100 != 2) { fail("save", r); return false; }
     dirty.clear(); fields = json::object();
     json o = get("/api/orders/" + std::to_string(order["id"].get<int>()));
     if (!o.is_null()) order = o;
@@ -161,7 +137,7 @@ struct Tui {
   void post_item(const json& item, const json& body) {
     std::string s = body.dump();
     Resp r = call("/api/items/" + std::to_string(item["id"].get<int>()), &s);
-    if (r.code / 100 != 2) return fail("item", r);
+    if (r.status / 100 != 2) return fail("item", r);
     refresh(); ok("saved item " + item.value("name", ""));
   }
 
@@ -207,9 +183,9 @@ struct Tui {
       else if (e == Event::Backspace || e == Event::Delete) dirty[id] = "missing";
       else if (e == Event::Character('p')) dirty[id] = "pending";
       else if (e == Event::Escape) goto_tab(0);
-      else if (e == Event::Character('d')) ask("due date YYYY-MM-DD", order["boleto"].value("due_date", ""), [this](auto& v) { fields["due_date"] = v; });
+      else if (e == Event::Character('d')) ask("due date YYYY-MM-DD", order["boleto"].value("due_date", ""), [this](auto& v) { setdate("due_date", v); });
       else if (e == Event::Character('l')) ask("linha digitavel", order["boleto"].value("linha", ""), [this](auto& v) { fields["linha_digitavel"] = v; });
-      else if (e == Event::Character('b')) ask("paid on YYYY-MM-DD", order["boleto"].value("paid_on", ""), [this](auto& v) { fields["paid_on"] = v; });
+      else if (e == Event::Character('b')) ask("paid on YYYY-MM-DD", order["boleto"].value("paid_on", ""), [this](auto& v) { setdate("paid_on", v); });
     } else if (tab == 2 && n > 0) {
       json it = items[c];
       auto num = [this, it](const char* key, const std::string& what) {
@@ -326,7 +302,6 @@ int main(int argc, char** argv) {
   g_url = u ? u : "http://localhost:8080";
   while (!g_url.empty() && g_url.back() == '/') g_url.pop_back();
   g_token = tk ? tk : "";
-  curl_global_init(CURL_GLOBAL_DEFAULT);
   if (argc >= 3 && std::string(argv[1]) == "import") return do_import(argv[2]);
   if (argc > 1) { puts("usage: dionisio [import FILE]"); return 1; }
 
