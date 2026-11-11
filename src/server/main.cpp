@@ -54,6 +54,8 @@ static httplib::Server::Handler mut(httplib::Server::Handler h) {
       std::lock_guard<std::mutex> lock(g_mu);
       bool changed = sqlite3_total_changes(g_db) != before;
       bool ok = sqlite3_total_changes(g_db) == g_saved || persist();
+      // Accepted: a request that wrote while some other request's 412 reload ran may get a spurious 503
+      // even if its write survived. Only happens during a deploy overlap, and every mut route is idempotent.
       return ok && !(changed && g_reloads != reloads);
     };
     try {
@@ -222,8 +224,16 @@ static void daily(const Request& req, Response& res) {
   });
 
   std::vector<const Dm*> sent;
-  for (auto& dm : todo)
+  // Stay inside Scheduler's 60 s attempt deadline: unsent DMs are not recorded, count as failed (-> 500), and
+  // the retry sends them.
+  auto start = std::chrono::steady_clock::now();
+  for (auto& dm : todo) {
+    if (std::chrono::steady_clock::now() - start > std::chrono::seconds(45)) {
+      std::fprintf(stderr, "daily: 45 s budget hit, %zu DMs left for the retry\n", todo.size() - (&dm - todo.data()));
+      break;
+    }
     if (slack_dm(dm.target, dm.text, dm.renew)) sent.push_back(&dm);
+  }
   db([&] {
     for (auto* dm : sent)
       q("INSERT OR IGNORE INTO notifications (kind, ref_id, on_date, target) VALUES (?, ?, ?, ?)",

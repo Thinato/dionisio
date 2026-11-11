@@ -59,6 +59,7 @@ struct Tui {
   void setdate(const char* k, const std::string& v) {
     if (!v.empty() && !parse_date(v)) { status_err = true; status = "invalid date (YYYY-MM-DD)"; return; }
     fields[k] = v.empty() ? json(nullptr) : json(v);
+    discard_armed = false;
   }
 
   std::string bstr(const char* k) const {  // null -> ""
@@ -126,7 +127,7 @@ struct Tui {
     std::string s = b.dump();
     HttpResp r = call("/api/orders/" + std::to_string(order["id"].get<int>()), &s);
     if (r.status / 100 != 2) { fail("save", r); return false; }
-    dirty.clear(); fields = json::object();
+    dirty.clear(); fields = json::object(); discard_armed = false;
     json o = get("/api/orders/" + std::to_string(order["id"].get<int>()));
     if (!o.is_null()) order = o;
     ok("saved");
@@ -208,9 +209,10 @@ struct Tui {
       if (e == Event::Return && c < (int)orders.size()) open_order(orders[c]["id"].get<int>());
     } else if (tab == 1 && order.is_object() && n > 0) {
       int id = order["lines"][c]["id"].get<int>();
-      if (e == Event::Return) dirty[id] = "arrived";
-      else if (e == Event::Backspace || e == Event::Delete) dirty[id] = "missing";
-      else if (e == Event::Character('p')) dirty[id] = "pending";
+      const char* mark = e == Event::Return ? "arrived"
+                         : e == Event::Backspace || e == Event::Delete ? "missing"
+                         : e == Event::Character('p') ? "pending" : nullptr;
+      if (mark) { dirty[id] = mark; discard_armed = false; }
       else if (e == Event::Escape) goto_tab(0);
       else if (e == Event::Character('d')) ask("due date YYYY-MM-DD", bstr("due_date"), [this](auto& v) { setdate("due_date", v); });
       else if (e == Event::Character('l')) ask("linha digitavel", bstr("linha_digitavel"), [this](auto& v) {
@@ -218,6 +220,7 @@ struct Tui {
           status_err = true; status = "linha: up to 64 digits, dots and spaces"; return;
         }
         fields["linha_digitavel"] = v.empty() ? json(nullptr) : json(v);
+        discard_armed = false;
       });
       else if (e == Event::Character('b')) ask("paid on YYYY-MM-DD", bstr("paid_on"), [this](auto& v) { setdate("paid_on", v); });
     } else if (tab == 2 && n > 0) {

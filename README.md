@@ -108,8 +108,9 @@ gcloud iam workload-identity-pools providers create-oidc github --location globa
   --attribute-mapping google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref \
   --attribute-condition "assertion.repository=='Thinato/dionisio' && assertion.ref=='refs/heads/main'"
 gcloud iam service-accounts add-iam-policy-binding $DEPLOY_SA --role roles/iam.workloadIdentityUser \
-  --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.ref/refs/heads/main"
-# Only main can deploy: the provider condition and the binding both require refs/heads/main.
+  --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.repository/Thinato/dionisio"
+# Only main can deploy: the provider's attribute-condition rejects any token whose ref is not refs/heads/main,
+# and the binding is scoped to this repository.
 # Also turn on branch protection for main (require PR + passing ci) so nobody pushes straight to it.
 
 # 8. GitHub repo variables (Settings -> Secrets and variables -> Actions -> Variables)
