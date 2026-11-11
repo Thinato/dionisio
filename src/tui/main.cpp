@@ -15,10 +15,9 @@
 using json = nlohmann::json;
 using namespace ftxui;
 
-using Resp = HttpResp;
 static std::string g_url, g_token;
 
-static Resp call(const std::string& path, const std::string* body = nullptr) {
+static HttpResp call(const std::string& path, const std::string* body = nullptr) {
   // 30 s: Cloud Run cold start
   return http(body ? "POST" : "GET", g_url + path, {"Authorization: Bearer " + g_token, "Content-Type: application/json"}, body ? *body : "", 30000);
 }
@@ -33,7 +32,7 @@ static std::string slurp(const std::string& f) {
 static int do_import(const std::string& file) {
   std::string raw = slurp(file);
   if (raw.empty()) { puts("error: cannot read file"); return 1; }
-  Resp r = call("/api/orders", &raw);
+  HttpResp r = call("/api/orders", &raw);
   if (r.status == 201) printf("created: order %d\n", json::parse(r.body, nullptr, false).value("id", 0));
   else if (r.status == 409) puts("rejected: already imported");
   else if (r.status == 400) puts("rejected: unknown export format");
@@ -70,14 +69,20 @@ struct Tui {
   bool unsaved() const { return !dirty.empty() || !fields.empty(); }
 
   json get(const std::string& path) {
-    Resp r = call(path);
+    HttpResp r = call(path);
     if (r.status != 200) {
       fail(path, r);
       return nullptr;
     }
-    return json::parse(r.body, nullptr, false);
+    json j = json::parse(r.body, nullptr, false);
+    if (j.is_discarded()) {
+      status_err = true;
+      status = path + ": invalid JSON from server";
+      return nullptr;
+    }
+    return j;
   }
-  void fail(const std::string& what, const Resp& r) {
+  void fail(const std::string& what, const HttpResp& r) {
     status_err = true;
     std::string msg = r.status ? "HTTP " + std::to_string(r.status) : "network";
     json j = json::parse(r.body, nullptr, false);
@@ -119,18 +124,35 @@ struct Tui {
     json b = fields;
     if (!dirty.empty()) for (auto& [id, a] : dirty) b["lines"][std::to_string(id)] = a;
     std::string s = b.dump();
-    Resp r = call("/api/orders/" + std::to_string(order["id"].get<int>()), &s);
+    HttpResp r = call("/api/orders/" + std::to_string(order["id"].get<int>()), &s);
     if (r.status / 100 != 2) { fail("save", r); return false; }
     dirty.clear(); fields = json::object();
     json o = get("/api/orders/" + std::to_string(order["id"].get<int>()));
     if (!o.is_null()) order = o;
-    refresh();
     ok("saved");
+    refresh();
     return true;
   }
 
+  // Leaving the order screen saves. If saving fails, a second attempt discards the edits instead.
+  bool discard_armed = false;
+  bool leave_order() {
+    if (tab != 1 || save()) {
+      discard_armed = false;
+      return true;
+    }
+    if (discard_armed) {
+      dirty.clear(); fields = json::object(); discard_armed = false;
+      ok("unsaved changes discarded");
+      return true;
+    }
+    discard_armed = true;
+    status += "  (press again to discard changes)";
+    return false;
+  }
+
   void goto_tab(int t) {
-    if (tab == 1 && !save()) return;  // leaving the order screen saves
+    if (!leave_order()) return;
     tab = t;
     if (t != 1) refresh();
   }
@@ -141,7 +163,7 @@ struct Tui {
 
   void post_item(const json& item, const json& body) {
     std::string s = body.dump();
-    Resp r = call("/api/items/" + std::to_string(item["id"].get<int>()), &s);
+    HttpResp r = call("/api/items/" + std::to_string(item["id"].get<int>()), &s);
     if (r.status / 100 != 2) return fail("item", r);
     refresh(); ok("saved item " + item.value("name", ""));
   }
@@ -180,7 +202,7 @@ struct Tui {
     else if (e.is_character() && e.character() >= "1" && e.character() <= "5") goto_tab(e.character()[0] - '1');
     else if (e == Event::Character('r')) { if (tab != 1) refresh(); }
     else if (e == Event::Character('s') && tab == 1) save();
-    else if (e == Event::Character('q')) { if (tab == 1 && !save()) return true; return false; }
+    else if (e == Event::Character('q')) return !leave_order();
     else if (tab == 0) {
       auto orders = home.value("orders", json::array());
       if (e == Event::Return && c < (int)orders.size()) open_order(orders[c]["id"].get<int>());
@@ -191,7 +213,12 @@ struct Tui {
       else if (e == Event::Character('p')) dirty[id] = "pending";
       else if (e == Event::Escape) goto_tab(0);
       else if (e == Event::Character('d')) ask("due date YYYY-MM-DD", bstr("due_date"), [this](auto& v) { setdate("due_date", v); });
-      else if (e == Event::Character('l')) ask("linha digitavel", bstr("linha_digitavel"), [this](auto& v) { fields["linha_digitavel"] = v; });
+      else if (e == Event::Character('l')) ask("linha digitavel", bstr("linha_digitavel"), [this](auto& v) {
+        if (v.size() > 64 || v.find_first_not_of("0123456789. ") != std::string::npos) {
+          status_err = true; status = "linha: up to 64 digits, dots and spaces"; return;
+        }
+        fields["linha_digitavel"] = v.empty() ? json(nullptr) : json(v);
+      });
       else if (e == Event::Character('b')) ask("paid on YYYY-MM-DD", bstr("paid_on"), [this](auto& v) { setdate("paid_on", v); });
     } else if (tab == 2 && n > 0) {
       json it = items[c];
@@ -213,7 +240,6 @@ struct Tui {
   }
 
   static Element row(Element e, bool sel) { return sel ? (e | inverted | focus) : e; }
-  static Element t(const std::string& s) { return text(s); }
 
   std::string money(const json& v) const { return v.is_number() ? brl(v.get<long long>()) : "-"; }
 
@@ -230,8 +256,8 @@ struct Tui {
     int c = cur[tab];
     if (tab == 0) {
       auto cy = home.value("cycle", json::object());
-      rows.push_back(t("Cycle " + cy.value("start", "?") + " -> " + cy.value("next_boundary", "?")) | bold);
-      rows.push_back(t("Suggestions") | underlined);
+      rows.push_back(text("Cycle " + cy.value("start", "?") + " -> " + cy.value("next_boundary", "?")) | bold);
+      rows.push_back(text("Suggestions") | underlined);
       int hidden = 0;
       for (auto& s : home.value("suggestions", json::array())) {
         if (s.value("suggested", 0) == 0 && !s.value("missing_last_delivery", false)) { hidden++; continue; }
@@ -239,54 +265,54 @@ struct Tui {
                         " -> order " + std::to_string(s.value("suggested", 0));
         if (s.value("unknown_pack", false)) l += "  (pack unknown)";
         if (s.value("missing_last_delivery", false)) l += "  (missing last delivery)";
-        rows.push_back(t(l));
+        rows.push_back(text(l));
       }
-      if (hidden) rows.push_back(t("  (+" + std::to_string(hidden) + " sem demanda)") | dim);
-      rows.push_back(t("Orders (Enter opens)") | underlined);
+      if (hidden) rows.push_back(text("  (+" + std::to_string(hidden) + " sem demanda)") | dim);
+      rows.push_back(text("Orders (Enter opens)") | underlined);
       int i = 0;
       for (auto& o : home.value("orders", json::array())) {
         bool past = o.value("cycle_start", "") != cy.value("start", "");
-        auto line = hbox({t(" " + o.value("supplier", "") + " " + o.value("external_id", "") + "  " + std::to_string(o.value("lines_done", 0)) + "/" +
+        auto line = hbox({text(" " + o.value("supplier", "") + " " + o.value("external_id", "") + "  " + std::to_string(o.value("lines_done", 0)) + "/" +
                             std::to_string(o.value("lines_total", 0)) + (past ? "  (cycle " + o.value("cycle_start", "") + ")" : "") + "  "),
                          boleto(o.value("boleto", json::object()))});
         rows.push_back(row(line, i++ == c));
       }
     } else if (tab == 1) {
-      if (!order.is_object()) return t("Open an order from Home or Past cycles.");
-      rows.push_back(t(order.value("supplier", "") + " " + order.value("external_id", "") + "  delivery " +
+      if (!order.is_object()) return text("Open an order from Home or Past cycles.");
+      rows.push_back(text(order.value("supplier", "") + " " + order.value("external_id", "") + "  delivery " +
                        (order["delivery_date"].is_null() ? "-" : order["delivery_date"].get<std::string>())) | bold);
       auto b = order["boleto"];
       auto fv = [&](const char* k, const char* fk) {
-        if (fields.contains(fk)) return fields[fk].get<std::string>() + " *";
+        if (fields.contains(fk)) return (fields[fk].is_string() ? fields[fk].get<std::string>() : "(clear)") + " *";
         return b.contains(k) && !b[k].is_null() ? b[k].get<std::string>() : std::string("-");
       };
-      rows.push_back(t("due(d) " + fv("due_date", "due_date") + "   linha(l) " + fv("linha_digitavel", "linha_digitavel") + "   paid(b) " + fv("paid_on", "paid_on")));
+      rows.push_back(text("due(d) " + fv("due_date", "due_date") + "   linha(l) " + fv("linha_digitavel", "linha_digitavel") + "   paid(b) " + fv("paid_on", "paid_on")));
       int i = 0;
       for (auto& l : order["lines"]) {
         std::string a = arrival(l);
-        auto mark = a == "arrived" ? t("[x]") | color(Color::Green) : a == "missing" ? t("[-]") | color(Color::Red) : t("[ ]") | dim;
-        rows.push_back(row(hbox({t(" "), mark, t(" " + std::to_string(l.value("qty", 0)) + "x " + l.value("name", "") + "  " + brl(l.value("price_cents", 0)))}), i++ == c));
+        auto mark = a == "arrived" ? text("[x]") | color(Color::Green) : a == "missing" ? text("[-]") | color(Color::Red) : text("[ ]") | dim;
+        rows.push_back(row(hbox({text(" "), mark, text(" " + std::to_string(l.value("qty", 0)) + "x " + l.value("name", "") + "  " + brl(l.value("price_cents", 0)))}), i++ == c));
       }
     } else if (tab == 2) {
-      rows.push_back(t("p pack size, m min packs, a/Enter toggle active") | dim);
+      rows.push_back(text("p pack size, m min packs, a/Enter toggle active") | dim);
       int i = 0;
       for (auto& it : items) {
         std::string l = " " + it.value("supplier", "") + "  " + it.value("name", "") + "  pack " +
                         (it["pack_size"].is_null() ? "?" : std::to_string(it["pack_size"].get<int>())) + "  min " + std::to_string(it.value("admin_min_packs", 0)) +
                         (it.value("active", true) ? "" : "  [archived]");
-        rows.push_back(row(t(l), i++ == c));
+        rows.push_back(row(text(l), i++ == c));
       }
     } else if (tab == 3) {
       int i = 0;
-      for (auto& r : reqs) rows.push_back(row(t(" " + std::to_string(r.value("requesters", 0)) + "x  " + r.value("text", "")), i++ == c));
-      if (reqs.empty()) rows.push_back(t("No requests."));
+      for (auto& r : reqs) rows.push_back(row(text(" " + std::to_string(r.value("requesters", 0)) + "x  " + r.value("text", "")), i++ == c));
+      if (reqs.empty()) rows.push_back(text("No requests."));
     } else {
       int i = 0;
       for (auto& cy : cycles) {
         if (!past(cy)) continue;
-        rows.push_back(t("Cycle " + cy.value("start", "")) | bold);
+        rows.push_back(text("Cycle " + cy.value("start", "")) | bold);
         for (auto& o : cy["orders"]) {
-          rows.push_back(row(t(" " + o.value("supplier", "") + "  total " + money(o["total_cents"]) + "  due " + money(o["boleto"]["amount_due_cents"]) +
+          rows.push_back(row(text(" " + o.value("supplier", "") + "  total " + money(o["total_cents"]) + "  due " + money(o["boleto"]["amount_due_cents"]) +
                                (o["boleto"]["paid_on"].is_null() ? "" : "  paid " + o["boleto"]["paid_on"].get<std::string>())), i++ == c));
         }
       }
@@ -296,13 +322,13 @@ struct Tui {
 
   Element view() const {
     Elements tabs;
-    for (int i = 0; i < 5; i++) tabs.push_back(t(" " + std::to_string(i + 1) + " " + kTabs[i] + " ") | (i == tab ? inverted : nothing));
-    Element foot = t("");
+    for (int i = 0; i < 5; i++) tabs.push_back(text(" " + std::to_string(i + 1) + " " + kTabs[i] + " ") | (i == tab ? inverted : nothing));
+    Element foot = text("");
     if (tab == 1 && order.is_object())
-      foot = t("Arrived total: " + brl(amount()) + (unsaved() ? " *" : "") + "   Enter=arrived Bksp=missing p=pending s=save Esc=back");
-    else foot = t("1-5/Tab switch  j/k move  Enter open  r refresh  q quit");
-    Element st = editing ? hbox({t(prompt + ": "), t(buf), t("_") | blink}) | bold
-                         : t(status) | (status_err ? color(Color::Red) : color(Color::GrayLight));
+      foot = text("Arrived total: " + brl(amount()) + (unsaved() ? " *" : "") + "   Enter=arrived Bksp=missing p=pending s=save Esc=back");
+    else foot = text("1-5/Tab switch  j/k move  Enter open  r refresh  q quit");
+    Element st = editing ? hbox({text(prompt + ": "), text(buf), text("_") | blink}) | bold
+                         : text(status) | (status_err ? color(Color::Red) : color(Color::GrayLight));
     return vbox({hbox(tabs), separator(), body(), separator(), foot, st});
   }
 };
@@ -319,7 +345,13 @@ int main(int argc, char** argv) {
   Tui app;
   app.refresh();
   auto screen = ScreenInteractive::Fullscreen();
-  auto ui = Renderer([&] { return app.view(); }) | CatchEvent([&](Event e) {
+  auto ui = Renderer([&] {
+    try {
+      return app.view();
+    } catch (const std::exception& x) {  // unexpected JSON shape: show, don't die
+      return text(std::string("render error: ") + x.what()) | color(Color::Red);
+    }
+  }) | CatchEvent([&](Event e) {
     try {
       if (!app.key(e)) screen.Exit();
     } catch (const std::exception& x) {  // unexpected JSON shape: show, don't die
