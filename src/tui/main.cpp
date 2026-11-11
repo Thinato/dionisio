@@ -232,13 +232,16 @@ struct Tui {
       auto cy = home.value("cycle", json::object());
       rows.push_back(t("Cycle " + cy.value("start", "?") + " -> " + cy.value("next_boundary", "?")) | bold);
       rows.push_back(t("Suggestions") | underlined);
+      int hidden = 0;
       for (auto& s : home.value("suggestions", json::array())) {
+        if (s.value("suggested", 0) == 0 && !s.value("missing_last_delivery", false)) { hidden++; continue; }
         std::string l = "  " + s.value("item", "") + " [" + s.value("supplier", "") + "] units " + std::to_string(s.value("units", 0)) +
                         " -> order " + std::to_string(s.value("suggested", 0));
         if (s.value("unknown_pack", false)) l += "  (pack unknown)";
         if (s.value("missing_last_delivery", false)) l += "  (missing last delivery)";
         rows.push_back(t(l));
       }
+      if (hidden) rows.push_back(t("  (+" + std::to_string(hidden) + " sem demanda)") | dim);
       rows.push_back(t("Orders (Enter opens)") | underlined);
       int i = 0;
       for (auto& o : home.value("orders", json::array())) {
