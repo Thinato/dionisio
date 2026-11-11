@@ -1,0 +1,89 @@
+{
+  "orderId": "9354967539",
+  "store": "43.667.636/0001-02 Brick Tecnologia ltda",
+  "placed": "Seg, 9 de nov de 2026",
+  "seller": "Ambev",
+  "total": 602.41,
+  "orderNumber": null,
+  "deliveryAddress": "Sete de Setembro, 2451, Sala 2002 Andar 20 Cond 7th Avenue Life e Wobloco 7th Avenue Office Ch, Rebouças, Curitiba, PR, Curitiba, PR, 80230010",
+  "paymentMethod": "Boleto",
+  "storeCnpj": "43.667.636/0001-02",
+  "storeName": "Brick Tecnologia ltda",
+  "placedDate": "2026-11-09",
+  "status": "Entregue",
+  "delivery": "Hoje, Nov. 10",
+  "deliveryDate": "2026-11-10",
+  "items": [
+    {
+      "name": "Energético Red Bull Lata 250ml Caixa c/ 6 un",
+      "sku": "0019229",
+      "quantity": 2,
+      "unitPrice": 48,
+      "listPrice": 48.36,
+      "unitDiscount": 0.36,
+      "subtotal": 96.4
+    },
+    {
+      "name": "Energético Red Bull Lata 355ml Caixa c/ 4 un",
+      "sku": "0019227",
+      "quantity": 2,
+      "unitPrice": 40.4,
+      "listPrice": 41.04,
+      "unitDiscount": 0.64,
+      "subtotal": 81.14
+    },
+    {
+      "name": "Energético Red Bull Zero Lata 250ml Caixa c/ 4 Un",
+      "sku": "0036434",
+      "quantity": 5,
+      "unitPrice": 30,
+      "listPrice": 32.24,
+      "unitDiscount": 2.24,
+      "subtotal": 150.63
+    },
+    {
+      "name": "Refrigerante Guaraná Antarctica Zero Lata 350ml Caixa c/ 12 un",
+      "sku": "0009085",
+      "quantity": 2,
+      "unitPrice": 37.92,
+      "listPrice": 37.92,
+      "unitDiscount": 0,
+      "subtotal": 76.16
+    },
+    {
+      "name": "Refrigerante Pepsi Black Lata 350ml Caixa c/ 12 un",
+      "sku": "0009274",
+      "quantity": 2,
+      "unitPrice": 37.8,
+      "listPrice": 37.8,
+      "unitDiscount": 0,
+      "subtotal": 75.92
+    },
+    {
+      "name": "Refrigerante Pepsi Twist Lata 350ml Caixa c/ 12 un",
+      "sku": "0009093",
+      "quantity": 2,
+      "unitPrice": 37.8,
+      "listPrice": 37.8,
+      "unitDiscount": 0,
+      "subtotal": 75.92
+    },
+    {
+      "name": "Água Mineral Fonte da Ilha Com Gás Pet 500ml Caixa c/ 12 un",
+      "sku": "0006905",
+      "quantity": 3,
+      "unitPrice": 15.35,
+      "listPrice": 16.3,
+      "unitDiscount": 0.95,
+      "subtotal": 46.24
+    }
+  ],
+  "itemCount": 7,
+  "totalQuantity": 18,
+  "summary": {
+    "subtotal": 615.97,
+    "paymentMethodFee": 2.52,
+    "total": 602.41,
+    "savings": 16.08
+  }
+}
