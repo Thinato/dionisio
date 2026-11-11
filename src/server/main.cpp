@@ -158,9 +158,9 @@ static void post_item(const Request& req, Response& res) {
     tx([&] {
       for (auto& [k, v] : fields) q("UPDATE items SET " + k + " = ? WHERE id = ? AND " + k + " IS NOT ?", {v, id, v});
     });
-    for (auto& it : items_json())
-      if (it["id"] == id) return {200, it};
-    return {404, {{"error", "item not found"}}};
+    json it = q("SELECT id, supplier, name, sku, pack_size, admin_min_packs, active FROM items WHERE id = ?", {id})[0];
+    it["active"] = it["active"] == 1;
+    return {200, it};
   });
   reply(res, out.first, out.second);
 }

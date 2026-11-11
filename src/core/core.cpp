@@ -17,7 +17,6 @@ int64_t to_cents(double reais) {
 }
 
 std::string brl(int64_t cents) {
-  if (cents < 0) return "-" + brl(-cents);
   char buf[32];
   std::snprintf(buf, sizeof buf, "R$ %lld.%02lld", (long long)(cents / 100), (long long)(cents % 100));
   return buf;
@@ -49,8 +48,6 @@ Date cycle_start(Date d, Date anchor) {
 }
 
 Date next_boundary_after(Date d, Date anchor) { return cycle_start(d, anchor) + days(14); }
-
-bool is_active(Date expires_on, Date today) { return expires_on >= today; }
 
 Date renew_to(Date expires_on, Date today, Date anchor) {
   return next_boundary_after(std::max(today, expires_on), anchor);

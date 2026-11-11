@@ -13,7 +13,7 @@ inline constexpr Date kAnchor = std::chrono::sys_days{std::chrono::year{2026} / 
 
 // Money: integer centavos everywhere; doubles only inside the export parser.
 int64_t to_cents(double reais);  // llround(x*100); throws std::invalid_argument on negative / non-finite
-std::string brl(int64_t cents);  // 89516 -> "R$ 895.16"
+std::string brl(int64_t cents);  // cents >= 0; 89516 -> "R$ 895.16"
 
 // Dates. ponytail: fixed -03:00; tzdb if Brazil reinstates DST.
 std::optional<Date> parse_date(std::string_view s);  // strict, valid YYYY-MM-DD only
@@ -21,7 +21,6 @@ std::string iso(Date d);                             // YYYY-MM-DD
 Date today_brt();                                    // floor((unix - 10800) / 86400)
 Date cycle_start(Date d, Date anchor = kAnchor);     // anchor + 14*floor((d-anchor)/14)
 Date next_boundary_after(Date d, Date anchor = kAnchor);  // first boundary Monday > d
-bool is_active(Date expires_on, Date today);              // expires_on >= today
 Date renew_to(Date expires_on, Date today, Date anchor = kAnchor);  // next_boundary_after(max(today, expires_on))
 
 // Export parsing. Detect by items[0]: "sku" -> BEES, "totalPrice" -> JUNTOS, else throw.
