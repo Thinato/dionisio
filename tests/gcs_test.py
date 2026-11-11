@@ -55,11 +55,12 @@ threading.Thread(target=fake.serve_forever, daemon=True).start()
 tmp = tempfile.mkdtemp()
 
 
-def start(name):
+def start(name, **extra):
     port = free_port()
     env = dict(os.environ, PORT=str(port), DB_PATH=os.path.join(tmp, name + ".db"), API_TOKEN=TOKEN,
                GCS_BUCKET="b", GCS_ENDPOINT="http://127.0.0.1:%d" % fake.server_address[1],
                ALLOW_TODAY_OVERRIDE="1", SLACK_SIGNING_SECRET="x", ADMIN_SLACK_IDS="UA")
+    env.update(extra)
     p = subprocess.Popen([SERVER], env=env)
     return p, "http://127.0.0.1:%d" % port
 
@@ -143,6 +144,10 @@ try:
     check(Gcs.gen == before + 1, "against the new generation")
 finally:
     p.terminate(); p.wait()
+
+# --- GCS without admins: nobody would get Boleto alerts, refuse to start
+p, _ = start("noadmin", ADMIN_SLACK_IDS="")
+check(p.wait(timeout=10) != 0, "GCS_BUCKET without ADMIN_SLACK_IDS exits non-zero")
 
 # --- startup GET failure: must not start on an empty DB
 Gcs.get_status = 500

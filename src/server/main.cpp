@@ -189,6 +189,7 @@ static void daily(const Request& req, Response& res) {
       json o = order_json(r["id"], today, false);
       const json& b = o["boleto"];
       int64_t amount = b["amount_due_cents"];
+      if (amount == 0) continue;  // everything missing: nothing to pay
       auto due = b["due_date"].is_string() ? parse_date(b["due_date"].get<std::string>()) : std::nullopt;
       for (auto& admin : admins) {
         if (!due)
@@ -211,6 +212,11 @@ static void daily(const Request& req, Response& res) {
         add({a->kind, iso(a->key), p["slack_user_id"],
              renewal_dm(p["name"].get<std::string>(), p["count"], p["period"].get<std::string>(), *exp), p["id"],
              p["id"]});
+    }
+    // ponytail: cap per run so a bug or abuse can't spam Slack; the rest go out on the next run.
+    if (out.size() > 200) {
+      std::fprintf(stderr, "daily: %zu DMs due, sending the first 200\n", out.size());
+      out.resize(200);
     }
     return out;
   });
@@ -237,6 +243,10 @@ int main() {
     return 1;
   }
   g_anchor = *anchor;
+  if (!env("GCS_BUCKET").empty() && env("ADMIN_SLACK_IDS").empty()) {
+    std::fprintf(stderr, "ADMIN_SLACK_IDS is required when GCS_BUCKET is set (nobody would get Boleto alerts)\n");
+    return 1;
+  }
   if (!gcs_restore()) {
     std::fprintf(stderr, "restore from GCS failed; refusing to start on an empty DB\n");
     return 1;
@@ -257,8 +267,8 @@ int main() {
   svr.set_exception_handler([](const Request& req, Response& res, std::exception_ptr ep) {
     try {
       std::rethrow_exception(ep);
-    } catch (const json::exception& e) {
-      reply(res, 400, {{"error", std::string("bad request: ") + e.what()}});
+    } catch (const json::parse_error& e) {
+      reply(res, 400, {{"error", std::string("invalid JSON: ") + e.what()}});
     } catch (const std::exception& e) {
       std::fprintf(stderr, "%s %s: %s\n", req.method.c_str(), req.path.c_str(), e.what());
       reply(res, 500, {{"error", "internal error"}});

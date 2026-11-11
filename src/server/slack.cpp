@@ -41,22 +41,25 @@ static bool signed_ok(const Request& req) {
   return sig.size() == want.size() && CRYPTO_memcmp(sig.data(), want.data(), want.size()) == 0;
 }
 
-static json post_json(const std::string& url, const json& payload, const std::string& token) {
+static json post_json(const std::string& url, const json& payload, const std::string& token, long timeout_ms) {
   std::vector<std::string> h = {"Content-Type: application/json; charset=utf-8"};
   if (!token.empty()) h.push_back("Authorization: Bearer " + token);
-  auto r = http("POST", url, h, payload.dump(-1, ' ', false, json::error_handler_t::replace));
+  auto r = http("POST", url, h, payload.dump(-1, ' ', false, json::error_handler_t::replace), timeout_ms);
   if (r.status != 200) return {{"ok", false}, {"error", "http " + std::to_string(r.status) + " " + r.body}};
   auto j = json::parse(r.body, nullptr, false);
   return j.is_object() ? j : json{{"ok", r.body == "ok"}};  // response_url answers plain "ok"
 }
 
+static std::string api_base() { return env("SLACK_API_BASE", "https://slack.com/api"); }
+
+// views.open must beat the 3 s trigger_id window; chat.postMessage runs in the daily job and can wait longer.
 static json slack_api(const std::string& method, const json& payload) {
-  static const std::string token = env("SLACK_BOT_TOKEN"), base = env("SLACK_API_BASE", "https://slack.com/api");
+  static const std::string token = env("SLACK_BOT_TOKEN");
   if (token.empty()) {
-    std::printf("[slack dry-run] %s %s\n", method.c_str(), payload.dump().c_str());
+    std::printf("[slack dry-run] %s %s\n", method.c_str(), payload.value("channel", "").c_str());
     return {{"ok", true}};
   }
-  auto r = post_json(base + "/" + method, payload, token);
+  auto r = post_json(api_base() + "/" + method, payload, token, method == "chat.postMessage" ? 5000 : 2500);
   if (!r.value("ok", false)) std::fprintf(stderr, "slack %s failed: %s\n", method.c_str(), r.dump().c_str());
   return r;
 }
@@ -141,15 +144,24 @@ static bool all_digits(const std::string& s, size_t max = 18) {
   return !s.empty() && s.size() <= max && s.find_first_not_of("0123456789") == std::string::npos;
 }
 
+// Form fields from the signed body only; the URL query is never trusted.
+static std::string form(const Request& req, const char* key) {
+  httplib::Params f;
+  httplib::detail::parse_query_text(req.body, f);
+  auto it = f.find(key);
+  return it == f.end() ? "" : it->second;
+}
+
 void slack_commands(const Request& req, Response& res) {
   if (!signed_ok(req)) return reply(res, 401, {{"error", "bad signature"}});
-  std::string user = req.get_param_value("user_id"), text = trim(req.get_param_value("text"));
+  std::string user = form(req, "user_id"), text = trim(form(req, "text"));
+  if (user.empty()) return reply(res, 400, {{"error", "missing user_id"}});
   Date today = today_of(req);
   auto ephemeral = [&](const std::string& t) { reply(res, 200, {{"response_type", "ephemeral"}, {"text", t}}); };
 
   if (text.empty()) {
     auto items = db([] { return q("SELECT id, name FROM items WHERE active = 1 ORDER BY name LIMIT 99"); });
-    auto r = slack_api("views.open", {{"trigger_id", req.get_param_value("trigger_id")}, {"view", modal(items)}});
+    auto r = slack_api("views.open", {{"trigger_id", form(req, "trigger_id")}, {"view", modal(items)}});
     if (!r.value("ok", false)) return ephemeral(kRetry);
     res.status = 200;
     return;
@@ -194,27 +206,35 @@ static void view_submission(const json& p, const std::string& user, Date today, 
   if (period != "day" && period != "week") errors["period"] = "Escolha dia ou semana.";
   if (errors.empty()) {
     std::string exp = iso(next_boundary_after(today, g_anchor));
-    bool ok = db([&] {
+    std::string err = db([&]() -> std::string {
+      // ponytail: 30 active preferences per user caps one account's DM/demand footprint.
+      bool existing = !q("SELECT 1 FROM preferences WHERE slack_user_id = ? AND expires_on >= ? AND "
+                         "(item_id = ? OR other_norm = ?)",
+                         {user, iso(today), item == "other" ? json(nullptr) : json(std::stoll(item)),
+                          item == "other" ? json(norm_name(other)) : json(nullptr)})
+                           .empty();
+      if (!existing && active_prefs(user, today).size() >= 30) return "Limite de 30 preferências atingido.";
       if (item == "other") {
         q("INSERT INTO preferences (slack_user_id, other_text, other_norm, count, period, expires_on) "
           "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (slack_user_id, other_norm) WHERE other_norm IS NOT NULL "
           "DO UPDATE SET other_text = excluded.other_text, count = excluded.count, period = excluded.period, "
           "expires_on = excluded.expires_on",
           {user, other, norm_name(other), count[0] - '0', period, exp});
-        return true;
+        return "";
       }
-      if (q("SELECT 1 FROM items WHERE id = ? AND active = 1", {std::stoll(item)}).empty()) return false;
+      if (q("SELECT 1 FROM items WHERE id = ? AND active = 1", {std::stoll(item)}).empty())
+        return "Item indisponível, escolha outro.";
       q("INSERT INTO preferences (slack_user_id, item_id, count, period, expires_on) VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT (slack_user_id, item_id) WHERE item_id IS NOT NULL "
         "DO UPDATE SET count = excluded.count, period = excluded.period, expires_on = excluded.expires_on",
         {user, std::stoll(item), count[0] - '0', period, exp});
-      return true;
+      return "";
     });
-    if (ok) {
+    if (err.empty()) {
       res.status = 200;  // empty body closes the modal
       return;
     }
-    errors["item"] = "Item indisponível, escolha outro.";
+    errors["item"] = err;
   }
   reply(res, 200, {{"response_action", "errors"}, {"errors", errors}});
 }
@@ -237,13 +257,16 @@ static void renew(const json& p, const std::string& user, Date today) {
     q("UPDATE preferences SET expires_on = ? WHERE id = ?", {r[0]["expires_on"], std::stoll(id)});
     return "Renovada: " + describe(r[0]);
   });
-  std::string url = p.value("response_url", "");
-  if (!text.empty() && !url.empty()) post_json(url, {{"replace_original", true}, {"text", text}}, "");
+  // Only Slack's webhook host (or the SLACK_API_BASE origin, for tests) ever receives a POST from us.
+  std::string url = p.value("response_url", ""), base = api_base();
+  std::string origin = base.substr(0, base.find('/', base.find("://") + 3)) + "/";
+  bool allowed = url.rfind("https://hooks.slack.com/", 0) == 0 || url.rfind(origin, 0) == 0;
+  if (!text.empty() && allowed) post_json(url, {{"replace_original", true}, {"text", text}}, "", 2500);
 }
 
 void slack_interactions(const Request& req, Response& res) {
   if (!signed_ok(req)) return reply(res, 401, {{"error", "bad signature"}});
-  json p = json::parse(req.get_param_value("payload"));
+  json p = json::parse(form(req, "payload"));
   std::string type = p.value("type", "");
   std::string user = p.contains("user") ? p["user"].value("id", "") : "";
   if (user.empty()) return reply(res, 400, {{"error", "missing user"}});

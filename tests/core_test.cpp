@@ -53,6 +53,14 @@ int main() {
   THROWS(parse_export(R"({"orderId":"x","items":[],"summary":{"total":1}})"));
   THROWS(parse_export("not json"));
   THROWS(parse_export(R"({"orderId":"x","items":[{"name":"a","quantity":0,"totalPrice":1}],"summary":{"total":1}})"));
+  THROWS(parse_export(R"({"orderId":"x","items":[{"name":"a","quantity":1.5,"totalPrice":1}],"summary":{"total":1}})"));
+  THROWS(parse_export(R"({"orderId":"x","items":[{"name":"a","quantity":100001,"totalPrice":1}],"summary":{"total":1}})"));
+  THROWS(parse_export(R"({"orderId":null,"items":[{"name":"a","quantity":1,"totalPrice":1}],"summary":{"total":1}})"));
+  THROWS(parse_export(R"({"orderId":{},"items":[{"name":"a","quantity":1,"totalPrice":1}],"summary":{"total":1}})"));
+  THROWS(parse_export(R"({"orderId":"x","items":[{"name":"a","sku":null,"quantity":1,"subtotal":1}],"summary":{"total":1}})"));
+  auto nulldate = parse_export(
+      R"({"orderId":7,"deliveryDate":null,"items":[{"name":"a","quantity":1,"totalPrice":1}],"summary":{"total":1}})");
+  CHECK(nulldate.external_id == "7" && nulldate.delivery_date.empty());
 
   // pack sizes by sku
   std::map<std::string, int> want = {{"0019229", 6},  {"0019227", 4},  {"0036434", 4}, {"0009085", 12},
@@ -85,6 +93,7 @@ int main() {
   CHECK(to_cents(54.19) == 5419);
   CHECK(to_cents(0) == 0);
   THROWS(to_cents(-0.01));
+  THROWS(to_cents(1e9 + 1));
   THROWS(to_cents(std::numeric_limits<double>::quiet_NaN()));
   THROWS(to_cents(std::numeric_limits<double>::infinity()));
 

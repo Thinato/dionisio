@@ -335,6 +335,18 @@ def test_slack(s, monster):
     check(s.command("U9", "drop x")[1]["text"].startswith("Use /dionisio drop"), "drop usage")
     check(s.command("U8", "list")[1]["text"].startswith("Você não tem"), "empty list")
     check(s.command("U8", "help")[1]["text"].startswith("/dionisio:"), "help")
+    st, b = s.slack("/slack/commands?user_id=U9&text=list", {"user_id": "U8", "text": "help"})
+    check(b["text"].startswith("/dionisio:"), "slack fields come from the signed body, not the query")
+    check(s.slack("/slack/commands?user_id=U9", {"text": "list"})[0] == 400, "user_id only in query -> 400")
+
+    # SM2: at most 30 active preferences per user; updating an existing one still works
+    for i in range(30):
+        check(s.submit("U30", "other", other=f"snack {i}") == (200, ""), f"pref {i} under the cap")
+    st, b = s.submit("U30", "other", other="snack 30")
+    check(b == {"response_action": "errors", "errors": {"item": "Limite de 30 preferências atingido."}}, f"cap {b}")
+    check(s.submit("U30", "other", other="snack 0", count=2) == (200, ""), "update at the cap allowed")
+    for _ in range(30):
+        s.command("U30", "drop 1")
 
     # AC5 new items ranked by distinct requesters
     for u, t in (("U1", "Toddynho"), ("U2", "Toddynho"), ("U3", "  toddynho "), ("U4", "Paçoca")):
@@ -350,6 +362,10 @@ def test_slack(s, monster):
         return s.slack("/slack/interactions", {"payload": json.dumps(payload)}, today=today)
 
     f.take()
+    evil = {"type": "block_actions", "user": {"id": "U1"}, "actions": [{"action_id": "renew", "value": "999999"}],
+            "response_url": f.base.replace("127.0.0.1", "localhost") + "/response"}
+    s.slack("/slack/interactions", {"payload": json.dumps(evil)}, today=TODAY)
+    check(f.take("/response") == [], "response_url outside the allowed origin is never called")
     check(click("U2", exp - 2 * day)[0] == 200 and f.take("/response") == [], "renew by non-owner ignored")
     check(s.command("U1", "list")[1]["text"].endswith(f"até {exp}\n"), "non-owner did not renew")
     click("U1", exp - 2 * day)
@@ -449,10 +465,15 @@ def test_daily(s):
     paid = dict(json.loads(JUNTOS), orderId="nodue-paid")
     pid = s.call("POST", "/api/orders", json.dumps(paid).encode(), today=TODAY)[1]["id"]
     s.call("POST", f"/api/orders/{pid}", {"paid_on": "2026-11-26"})
+    zero = dict(json.loads(JUNTOS), orderId="zero-1")
+    zid = s.call("POST", "/api/orders", json.dumps(zero).encode(), today=TODAY)[1]["id"]
+    zlines = s.call("GET", f"/api/orders/{zid}")[1]["lines"]
+    s.call("POST", f"/api/orders/{zid}", {"due_date": "2026-11-28", "lines": {str(l["id"]): "missing" for l in zlines}})
     nag = "Pedido JUNTOS nodue-1 (R$ 1007.72) sem data de vencimento. Defina no TUI."
     for t in (dt.date(2026, 11, 27), dt.date(2026, 11, 28)):
         msgs = run(t)
         check(not any("BEES" in m[1] for m in msgs), f"paid order gets no DMs {t}")
+        check(not any("R$ 0.00" in m[1] for m in msgs), f"nothing to pay -> no DMs {t}")
         check(sorted(m for m in msgs if "sem data" in m[1]) == to_admins(nag), f"no-due nag {t}: {msgs}")
 
     # renewals backfill: pref expiring 12-07 (created 11-23); Friday 12-04 skipped -> Saturday sends renew72

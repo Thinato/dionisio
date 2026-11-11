@@ -12,7 +12,7 @@
 using namespace std::chrono;
 
 int64_t to_cents(double reais) {
-  if (!std::isfinite(reais) || reais < 0) throw std::invalid_argument("invalid money value");
+  if (!std::isfinite(reais) || reais < 0 || reais > 1e9) throw std::invalid_argument("invalid money value");
   return std::llround(reais * 100);
 }
 
@@ -56,6 +56,13 @@ Date renew_to(Date expires_on, Date today, Date anchor) {
   return next_boundary_after(std::max(today, expires_on), anchor);
 }
 
+// orderId / sku: a non-empty string or an integer, nothing else.
+static std::string scalar_id(const nlohmann::json& v, const char* what) {
+  if (v.is_string() && !v.get_ref<const std::string&>().empty()) return v.get<std::string>();
+  if (v.is_number_integer()) return v.dump();
+  throw std::invalid_argument(std::string("invalid ") + what);
+}
+
 ParsedOrder parse_export(const std::string& raw) {
   auto j = nlohmann::json::parse(raw);
   const auto& items = j.at("items");
@@ -65,22 +72,20 @@ ParsedOrder parse_export(const std::string& raw) {
 
   ParsedOrder o;
   o.supplier = bees ? "BEES" : "JUNTOS";
-  const auto& id = j.at("orderId");
-  o.external_id = id.is_string() ? id.get<std::string>() : id.dump();
-  if (o.external_id.empty()) throw std::invalid_argument("missing orderId");
-  auto dd = j.value("deliveryDate", std::string{});
-  if (parse_date(dd)) o.delivery_date = dd;
+  o.external_id = scalar_id(j.at("orderId"), "orderId");
+  if (auto dd = j.find("deliveryDate"); dd != j.end() && dd->is_string() && parse_date(dd->get_ref<const std::string&>()))
+    o.delivery_date = dd->get<std::string>();
   o.total_cents = to_cents(j.at("summary").at("total").get<double>());
   for (const auto& it : items) {
     ParsedLine l;
     l.name = it.at("name").get<std::string>();
-    if (bees) {
-      const auto& sku = it.at("sku");
-      l.sku = sku.is_string() ? sku.get<std::string>() : sku.dump();
-    }
-    l.qty = it.at("quantity").get<int>();
+    if (bees) l.sku = scalar_id(it.at("sku"), "sku");
+    const auto& qty = it.at("quantity");
+    if (!qty.is_number_integer() || qty.get<int64_t>() < 1 || qty.get<int64_t>() > 100000)
+      throw std::invalid_argument("quantity must be an integer in 1..100000");
+    l.qty = qty.get<int>();
     l.price_cents = to_cents(it.at(bees ? "subtotal" : "totalPrice").get<double>());
-    if (l.qty <= 0 || norm_name(l.name).empty()) throw std::invalid_argument("invalid line");
+    if (norm_name(l.name).empty()) throw std::invalid_argument("invalid line");
     o.lines.push_back(std::move(l));
   }
   return o;
@@ -107,6 +112,7 @@ std::string norm_name(std::string_view s) {
   return out;
 }
 
+// No overflow: to_cents caps a line at 1e11 centavos and the 1 MiB body caps the line count.
 int64_t arrived_total(const std::vector<LineState>& lines) {
   int64_t t = 0;
   for (const auto& l : lines)
