@@ -1,6 +1,6 @@
 FROM debian:bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    g++ cmake make git ca-certificates libcurl4-openssl-dev libsqlite3-dev libssl-dev \
+    g++ cmake make python3 ca-certificates libcurl4-openssl-dev libsqlite3-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY CMakeLists.txt ./
