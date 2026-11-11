@@ -1,9 +1,9 @@
 name: macos
 on:
   pull_request:
-    paths: [src/core/**, src/tui/**, CMakeLists.txt, tests/core_test.cpp]
+    paths: [src/core/**, src/tui/**, CMakeLists.txt, tests/core_test.cpp, tests/fixtures/**]
   push:
-    paths: [src/core/**, src/tui/**, CMakeLists.txt, tests/core_test.cpp]
+    paths: [src/core/**, src/tui/**, CMakeLists.txt, tests/core_test.cpp, tests/fixtures/**]
 
 jobs:
   tui:

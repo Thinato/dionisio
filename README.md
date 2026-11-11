@@ -29,13 +29,13 @@ Server-only build (what the Dockerfile does): `-DDIONISIO_TUI=OFF`.
 | `SLACK_SIGNING_SECRET` | Verifies `/slack/*` requests |
 | `SLACK_BOT_TOKEN` | Empty means dry-run: DMs are logged, not sent |
 | `SLACK_API_BASE` | Default `https://slack.com/api` |
-| `ADMIN_SLACK_IDS` | Comma-separated Slack user IDs that get Boleto alerts |
+| `ADMIN_SLACK_IDS` | Comma-separated Slack user IDs that get Boleto alerts. Required when `GCS_BUCKET` is set |
 | `CYCLE_ANCHOR` | `2026-11-09` |
 | `GCS_BUCKET` | Empty means local file only |
 | `GCS_ENDPOINT` | Default `https://storage.googleapis.com`; if set, the metadata token is skipped (tests) |
 | `ALLOW_TODAY_OVERRIDE` | `1` honours `?today=` (tests only) |
 
-Persistence: with `GCS_BUCKET` set, the SQLite file is restored from one GCS object at startup and uploaded after every mutating request, with `ifGenerationMatch`. If another writer got there first (deploy overlap), the server reloads the latest copy and answers 503, and the client retries. If the restore fails for any reason other than "not found", the server exits instead of starting empty.
+Persistence: with `GCS_BUCKET` set, the SQLite file is restored from one GCS object at startup and uploaded after every mutating request, with `ifGenerationMatch`. If another writer got there first (deploy overlap), the server reloads the latest copy and answers 503, and the client retries. Each upload is tried once, with no 429 retry (a deviation from the plan): a failed upload answers 503, and the next mutating request, even the client's no-op retry, uploads the pending change. If the restore fails for any reason other than "not found", the server exits instead of starting empty.
 
 ## TUI
 
@@ -75,11 +75,14 @@ gcloud artifacts repositories create dionisio --repository-format docker --locat
 echo '[{"name":"keep-3","action":{"type":"Keep"},"mostRecentVersions":{"keepCount":3}}]' > cleanup.json
 gcloud artifacts repositories set-cleanup-policies dionisio --location us-central1 --policy cleanup.json --no-dry-run --project $PROJECT_ID
 
-# 4. Secrets
+# 4. Secrets. The API token is random; keep $API_TOKEN for the TUI and the Scheduler job (step 10).
+API_TOKEN=$(openssl rand -hex 32)
 for s in api-token slack-signing-secret slack-bot-token; do
   gcloud secrets create $s --replication-policy automatic --project $PROJECT_ID
-  printf '%s' "<value for $s>" | gcloud secrets versions add $s --data-file=- --project $PROJECT_ID
 done
+printf '%s' "$API_TOKEN" | gcloud secrets versions add api-token --data-file=- --project $PROJECT_ID
+printf '%s' "<Slack signing secret>" | gcloud secrets versions add slack-signing-secret --data-file=- --project $PROJECT_ID
+printf '%s' "<xoxb-... bot token>" | gcloud secrets versions add slack-bot-token --data-file=- --project $PROJECT_ID
 
 # 5. Runtime service account
 gcloud iam service-accounts create dionisio-run --project $PROJECT_ID
@@ -103,10 +106,11 @@ gcloud iam workload-identity-pools providers create-oidc github --location globa
   --workload-identity-pool github --project $PROJECT_ID \
   --issuer-uri https://token.actions.githubusercontent.com \
   --attribute-mapping google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref \
-  --attribute-condition "assertion.repository=='Thinato/dionisio'"
+  --attribute-condition "assertion.repository=='Thinato/dionisio' && assertion.ref=='refs/heads/main'"
 gcloud iam service-accounts add-iam-policy-binding $DEPLOY_SA --role roles/iam.workloadIdentityUser \
-  --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.repository/Thinato/dionisio"
-# Only main deploys: enforced by the `if:` in .github/workflows/ci.yml.
+  --member "principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github/attribute.ref/refs/heads/main"
+# Only main can deploy: the provider condition and the binding both require refs/heads/main.
+# Also turn on branch protection for main (require PR + passing ci) so nobody pushes straight to it.
 
 # 8. GitHub repo variables (Settings -> Secrets and variables -> Actions -> Variables)
 gh variable set PROJECT_ID --repo Thinato/dionisio --body $PROJECT_ID
@@ -125,6 +129,8 @@ gcloud scheduler jobs create http dionisio-daily --location us-central1 --schedu
   --time-zone America/Sao_Paulo --uri $URL/jobs/daily --http-method POST \
   --headers "Authorization=Bearer $API_TOKEN" --max-retry-attempts 3 --min-backoff 5m --attempt-deadline 60s
 ```
+
+Rotating the API token: add a new `api-token` secret version, redeploy (or bump a revision), then update the job's header with `gcloud scheduler jobs update http dionisio-daily --location us-central1 --update-headers "Authorization=Bearer $NEW_TOKEN"` and the TUI's `DIONISIO_TOKEN`.
 
 11. Create the Slack app from the manifest (see above).
 12. Set a billing budget alert at R$5.

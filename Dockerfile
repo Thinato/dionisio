@@ -14,5 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4 libsqlite3-0 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/dionisio-server /usr/local/bin/dionisio-server
+RUN useradd -r -u 10001 app
+USER app
 ENV PORT=8080
 CMD ["dionisio-server"]

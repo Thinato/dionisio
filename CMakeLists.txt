@@ -6,7 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(DIONISIO_TUI "Build the dionisio admin TUI (FTXUI)" ON)
 
 include(FetchContent)
-FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
+FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+                     URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa)
 FetchContent_MakeAvailable(json)
 find_package(CURL REQUIRED)
 
@@ -22,6 +23,7 @@ add_test(NAME core COMMAND core_test)
 
 # cpp-httplib is header-only; SOURCE_SUBDIR skips its CMakeLists (no optional OpenSSL/zlib probing).
 FetchContent_Declare(httplib URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.66.0.tar.gz
+                     URL_HASH SHA256=537a77cdb96d3b4ad64d0b7103971de52eac75cd4ee03a2fdb84417b0d742459
                      SOURCE_SUBDIR none)
 FetchContent_MakeAvailable(httplib)
 find_package(SQLite3 REQUIRED)
@@ -45,7 +47,8 @@ foreach(t api gcs)
 endforeach()
 
 if(DIONISIO_TUI)
-  FetchContent_Declare(ftxui URL https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v7.0.3.tar.gz)
+  FetchContent_Declare(ftxui URL https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v7.0.3.tar.gz
+                        URL_HASH SHA256=e7c62ffe19009759821b4f0f8df7f2a6fb83784c3a9f1477d81f56d3ee723c88)
   FetchContent_MakeAvailable(ftxui)
   add_executable(dionisio src/tui/main.cpp)
   target_link_libraries(dionisio PRIVATE core ftxui::component ftxui::dom ftxui::screen)
