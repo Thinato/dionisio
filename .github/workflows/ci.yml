@@ -1,0 +1,44 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main, 'feat/**']
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libsqlite3-dev libssl-dev
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DDIONISIO_TUI=OFF
+      - run: cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
+
+  deploy:
+    needs: linux
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      IMAGE: us-central1-docker.pkg.dev/${{ vars.PROJECT_ID }}/dionisio/server:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      - run: docker build -t "$IMAGE" . && docker push "$IMAGE"
+      - run: |
+          gcloud run deploy dionisio --image "$IMAGE" --region us-central1 \
+            --service-account ${{ vars.RUN_SA }} \
+            --max-instances 1 --min-instances 0 --cpu 1 --memory 512Mi --cpu-boost \
+            --set-secrets API_TOKEN=api-token:latest,SLACK_SIGNING_SECRET=slack-signing-secret:latest,SLACK_BOT_TOKEN=slack-bot-token:latest \
+            --set-env-vars "^@^GCS_BUCKET=${{ vars.GCS_BUCKET }}@CYCLE_ANCHOR=2026-11-09@ADMIN_SLACK_IDS=${{ vars.ADMIN_SLACK_IDS }}"
+      - name: Smoke (unauthenticated /api/home must be 401)
+        run: |
+          URL=$(gcloud run services describe dionisio --region us-central1 --format='value(status.url)')
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$URL/api/home")" = 401

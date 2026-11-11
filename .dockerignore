@@ -1,0 +1,6 @@
+build/
+.git/
+.omc/
+*.db
+*.json
+!tests/fixtures/*.json
