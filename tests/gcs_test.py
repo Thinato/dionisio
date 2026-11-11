@@ -9,7 +9,7 @@ TOKEN = "t"
 
 
 class Gcs(BaseHTTPRequestHandler):
-    obj, gen, get_status = None, 0, None  # class-level state: the one bucket object
+    obj, gen, get_status, fail_uploads = None, 0, None, 0  # class-level state: the one bucket object
 
     def log_message(self, *a):
         pass
@@ -34,6 +34,9 @@ class Gcs(BaseHTTPRequestHandler):
         if self.path.startswith("/_hook/replace"):  # swap in another snapshot with a higher generation
             Gcs.obj, Gcs.gen = body, Gcs.gen + 10
             return self.reply(200)
+        if Gcs.fail_uploads:
+            Gcs.fail_uploads -= 1
+            return self.reply(503)
         want = self.path.split("ifGenerationMatch=")[1].split("&")[0]
         if want != str(Gcs.gen):
             return self.reply(412)
@@ -56,7 +59,7 @@ def start(name):
     port = free_port()
     env = dict(os.environ, PORT=str(port), DB_PATH=os.path.join(tmp, name + ".db"), API_TOKEN=TOKEN,
                GCS_BUCKET="b", GCS_ENDPOINT="http://127.0.0.1:%d" % fake.server_address[1],
-               ALLOW_TODAY_OVERRIDE="1", SLACK_SIGNING_SECRET="x")
+               ALLOW_TODAY_OVERRIDE="1", SLACK_SIGNING_SECRET="x", ADMIN_SLACK_IDS="UA")
     p = subprocess.Popen([SERVER], env=env)
     return p, "http://127.0.0.1:%d" % port
 
@@ -109,6 +112,15 @@ try:
     call(base, "GET", "/api/items")
     check(call(base, "POST", "/api/orders", raw=BEES)[0] == 409, "re-import is 409")
     check(Gcs.gen == 2, "GETs and no-op mut requests do not bump the generation")
+
+    # --- a failed upload is not forgotten: the client's retry (a no-op here) uploads it
+    Gcs.fail_uploads = 1
+    nodue = dict(json.loads(JUNTOS), orderId="retry-1")
+    check(call(base, "POST", "/api/orders", body=nodue)[0] == 503, "upload 503 -> request 503")
+    check(Gcs.gen == 2, "nothing uploaded yet")
+    check(call(base, "POST", "/api/orders", body=nodue)[0] == 409, "retry is a 409 (row is local)")
+    check(Gcs.gen == 3, "but the retry uploads the pending change")
+    check(call(base, "POST", "/api/orders", body=nodue)[0] == 409 and Gcs.gen == 3, "then nothing more to upload")
 finally:
     p.terminate(); p.wait()
 
@@ -116,7 +128,7 @@ p, base = start("two")  # fresh local DB: must restore from the fake bucket
 try:
     wait_up(p, base)
     s, home = call(base, "GET", "/api/home")
-    check(s == 200 and len(home["orders"]) == 2, "second server restores both orders from GCS")
+    check(s == 200 and len(home["orders"]) == 3, "second server restores every order from GCS")
 
     # --- forced 412: another writer replaced the object with an older snapshot
     item_id = min(i["id"] for i in call(base, "GET", "/api/items")[1])  # a JUNTOS item, present in snap1

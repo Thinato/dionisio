@@ -26,6 +26,8 @@ void reply(httplib::Response& res, int status, const json& body);
 extern sqlite3* g_db;
 extern std::string g_db_path;  // DB_PATH
 extern std::mutex g_mu;
+extern int g_saved;         // sqlite3_total_changes at the last successful persist or reload
+extern unsigned g_reloads;  // bumped by every 412 reload
 template <class F>
 auto db(F&& f) {
   std::lock_guard<std::mutex> lock(g_mu);
@@ -37,8 +39,13 @@ json q(const std::string& sql, const json& params = json::array());
 template <class F>
 void tx(F&& f) {
   q("BEGIN");
-  try { f(); } catch (...) { q("ROLLBACK"); throw; }
-  q("COMMIT");
+  try {
+    f();
+    q("COMMIT");
+  } catch (...) {
+    sqlite3_exec(g_db, "ROLLBACK", nullptr, nullptr, nullptr);
+    throw;
+  }
 }
 json order_json(int64_t id, Date today, bool with_lines);  // null if missing
 json home_json(Date today);
@@ -47,9 +54,9 @@ json requests_json(Date today);
 json cycles_json(Date today);
 std::pair<int, json> import_order(const ParsedOrder& o, Date today);  // 201 {id,...} | 409
 
-// gcs.cpp. Both are no-ops returning true when GCS_BUCKET is unset.
+// gcs.cpp. Without GCS_BUCKET: restore is a no-op, persist only advances g_saved.
 bool gcs_restore();  // startup, before open_db(): fetch the DB object into g_db_path. false -> exit(1)
-bool persist();      // called with g_mu held, after a mut route changed the DB. false -> 503
+bool persist();      // g_mu held, total_changes != g_saved. Updates g_saved on success/reload. false -> 503
 
 // slack.cpp. Slack HTTP calls never run under g_mu.
 void slack_commands(const httplib::Request& req, httplib::Response& res);      // POST /slack/commands

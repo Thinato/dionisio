@@ -8,6 +8,8 @@
 sqlite3* g_db = nullptr;
 std::string g_db_path;
 std::mutex g_mu;
+int g_saved = 0;
+unsigned g_reloads = 0;
 
 // ponytail: no migrations; add PRAGMA user_version steps on first schema change.
 static const char* kSchema = R"SQL(

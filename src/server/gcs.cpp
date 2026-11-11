@@ -1,12 +1,10 @@
 // SQLite snapshot persistence: one GCS object, whole-file upload per change, ifGenerationMatch guards writers.
 #include <unistd.h>
 
-#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <optional>
 #include <sstream>
-#include <thread>
 
 #include "server.hpp"
 
@@ -73,8 +71,8 @@ bool gcs_restore() {
 static bool copy_db(sqlite3* src, sqlite3* dst) {
   sqlite3_backup* b = sqlite3_backup_init(dst, "main", src, "main");
   if (!b) return false;
-  sqlite3_backup_step(b, -1);
-  return sqlite3_backup_finish(b) == SQLITE_OK;
+  int rc = sqlite3_backup_step(b, -1);
+  return sqlite3_backup_finish(b) == SQLITE_OK && rc == SQLITE_DONE;
 }
 
 // Someone else wrote first: replace the live DB contents in place with the latest object.
@@ -84,14 +82,20 @@ static void reload() {
   std::string tmp = g_db_path + ".reload";
   sqlite3* src = nullptr;
   if (write_file(tmp, r.body) && sqlite3_open_v2(tmp.c_str(), &src, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK &&
-      copy_db(src, g_db))
+      copy_db(src, g_db)) {
     g_gen = gen_of(r);
+    g_saved = sqlite3_total_changes(g_db);  // local == remote again
+    ++g_reloads;
+  }
   sqlite3_close(src);
   std::remove(tmp.c_str());
 }
 
 bool persist() {
-  if (bucket().empty()) return true;
+  if (bucket().empty()) {
+    g_saved = sqlite3_total_changes(g_db);
+    return true;
+  }
   std::string tmp = g_db_path + ".snap";
   sqlite3* dst = nullptr;
   bool ok = sqlite3_open(tmp.c_str(), &dst) == SQLITE_OK && copy_db(g_db, dst);
@@ -100,26 +104,23 @@ bool persist() {
   std::remove(tmp.c_str());
   if (!ok || bytes.empty()) return false;
 
-  for (int attempt = 0; attempt < 2; attempt++) {
-    auto h = auth();
-    if (!h) return false;
-    h->push_back("Content-Type: application/octet-stream");
-    auto r = http("POST",
-                  endpoint() + "/upload/storage/v1/b/" + bucket() + "/o?uploadType=media&name=" + kObject +
-                      "&ifGenerationMatch=" + g_gen,
-                  *h, bytes, kTimeoutMs);
-    if (r.status == 200) {
-      auto j = json::parse(r.body, nullptr, false);
-      if (!j.is_object() || !j.contains("generation")) return false;
-      g_gen = j["generation"].get<std::string>();
-      return true;
-    }
-    if (r.status == 412) {
-      reload();
-      return false;  // this request's write is lost; the client retries
-    }
-    if (r.status != 429 || attempt == 1) return false;  // transient failure: keep g_gen, next persist retries
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+  // One attempt, fail fast: on any failure g_saved stays behind, so the next mut request (even a no-op retry)
+  // uploads again.
+  auto h = auth();
+  if (!h) return false;
+  h->push_back("Content-Type: application/octet-stream");
+  auto r = http("POST",
+                endpoint() + "/upload/storage/v1/b/" + bucket() + "/o?uploadType=media&name=" + kObject +
+                    "&ifGenerationMatch=" + g_gen,
+                *h, bytes, kTimeoutMs);
+  if (r.status == 412) {
+    reload();
+    return false;  // this request's write is lost; the client retries
   }
-  return false;
+  if (r.status != 200) return false;
+  auto j = json::parse(r.body, nullptr, false);
+  if (!j.is_object() || !j.contains("generation") || !j["generation"].is_string()) return false;
+  g_gen = j["generation"].get<std::string>();
+  g_saved = sqlite3_total_changes(g_db);
+  return true;
 }

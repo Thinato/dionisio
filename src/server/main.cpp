@@ -44,13 +44,17 @@ static bool token_ok(const Request& req) {
   return !want.empty() && got.size() == want.size() && CRYPTO_memcmp(got.data(), want.data(), want.size()) == 0;
 }
 
-// Wrap a mutating route: if the handler changed the DB (even on error paths), persist before responding.
+// Wrap a mutating route: persist anything not yet uploaded (even on error paths) before responding.
+// Comparing against g_saved, not the request's own baseline, makes a retried no-op upload a change an
+// earlier failed persist left behind. A 412 reload during this request may have wiped its write -> 503.
 static httplib::Server::Handler mut(httplib::Server::Handler h) {
   return [h](const Request& req, Response& res) {
-    int before = db([] { return sqlite3_total_changes(g_db); });
+    auto [before, reloads] = db([] { return std::pair{sqlite3_total_changes(g_db), g_reloads}; });
     auto persisted = [&] {
       std::lock_guard<std::mutex> lock(g_mu);
-      return sqlite3_total_changes(g_db) == before || persist();
+      bool changed = sqlite3_total_changes(g_db) != before;
+      bool ok = sqlite3_total_changes(g_db) == g_saved || persist();
+      return ok && !(changed && g_reloads != reloads);
     };
     try {
       h(req, res);
@@ -238,6 +242,7 @@ int main() {
     return 1;
   }
   open_db();
+  g_saved = sqlite3_total_changes(g_db);
 
   httplib::Server svr;
   svr.set_payload_max_length(1 << 20);
