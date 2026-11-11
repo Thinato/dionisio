@@ -8,12 +8,18 @@
 
 #include "core.hpp"
 
-namespace httplib { class Server; }
+namespace httplib {
+class Server;
+struct Request;
+struct Response;
+}  // namespace httplib
 using json = nlohmann::json;
 
 // main.cpp
 std::string env(const char* key, const char* def = "");
 extern Date g_anchor;  // CYCLE_ANCHOR
+Date today_of(const httplib::Request& req);  // ?today= only when ALLOW_TODAY_OVERRIDE=1
+void reply(httplib::Response& res, int status, const json& body);
 
 // db.cpp. ponytail: one global lock around every DB access + persist; 25 users.
 extern sqlite3* g_db;
@@ -43,3 +49,8 @@ std::pair<int, json> import_order(const ParsedOrder& o, Date today);  // 201 {id
 // gcs.cpp. Both are no-ops returning true when GCS_BUCKET is unset.
 bool gcs_restore();  // startup, before open_db(): fetch the DB object into g_db_path. false -> exit(1)
 bool persist();      // called with g_mu held, after a mut route changed the DB. false -> 503
+
+// slack.cpp. Slack HTTP calls never run under g_mu.
+void slack_commands(const httplib::Request& req, httplib::Response& res);      // POST /slack/commands
+void slack_interactions(const httplib::Request& req, httplib::Response& res);  // POST /slack/interactions
+bool slack_dm(const std::string& user, const std::string& text, const json& blocks = nullptr);

@@ -18,12 +18,12 @@ std::string env(const char* key, const char* def) {
   return v && *v ? v : def;
 }
 
-static void reply(Response& res, int status, const json& body) {
+void reply(Response& res, int status, const json& body) {
   res.status = status;
   res.set_content(body.dump(-1, ' ', false, json::error_handler_t::replace), "application/json");
 }
 
-static Date today_of(const Request& req) {
+Date today_of(const Request& req) {
   if (env("ALLOW_TODAY_OVERRIDE") == "1" && req.has_param("today"))
     if (auto d = parse_date(req.get_param_value("today"))) return *d;
   return today_brt();
@@ -202,6 +202,8 @@ int main() {
   svr.Get("/api/requests", [](const Request& req, Response& res) {
     reply(res, 200, db([&] { return requests_json(today_of(req)); }));
   });
+  svr.Post("/slack/commands", mut(slack_commands));
+  svr.Post("/slack/interactions", mut(slack_interactions));
   svr.Get("/api/cycles", [](const Request& req, Response& res) {
     reply(res, 200, db([&] { return cycles_json(today_of(req)); }));
   });

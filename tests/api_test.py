@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """End-to-end API test. Stdlib only. Usage: api_test.py <path-to-dionisio-server>"""
 import datetime as dt
+import hashlib
+import hmac
+import http.server
 import json
 import os
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
 import urllib.error
 import urllib.request
 
@@ -38,13 +43,55 @@ def next_boundary_after(d):
     return ANCHOR + dt.timedelta(days=14 * ((d - ANCHOR).days // 14 + 1))
 
 
+class FakeSlack(http.server.ThreadingHTTPServer):
+    """Records every request; serves views.open, chat.postMessage and response_url."""
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), FakeSlackHandler)
+        self.reqs = []
+        self.fail_views_open = False
+        self.fail_dm_once = set()  # channels whose next chat.postMessage fails
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+
+    @property
+    def base(self):
+        return f"http://127.0.0.1:{self.server_address[1]}"
+
+    def take(self, path=None):
+        out = [r for r in self.reqs if path is None or r["path"] == path]
+        self.reqs = [r for r in self.reqs if r not in out]
+        return out
+
+
+class FakeSlackHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
+        self.server.reqs.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
+        raw = b"ok"  # response_url
+        if self.path == "/api/views.open":
+            raw = json.dumps({"ok": not self.server.fail_views_open}).encode()
+        elif self.path == "/api/chat.postMessage":
+            ch = body.get("channel")
+            raw = json.dumps({"ok": ch not in self.server.fail_dm_once}).encode()
+            self.server.fail_dm_once.discard(ch)
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
 class Server:
-    def __init__(self, **extra):
+    def __init__(self, fake):
+        self.fake = fake
         self.tmp = tempfile.mkdtemp()
         self.port = free_port()
         env = dict(os.environ, PORT=str(self.port), DB_PATH=os.path.join(self.tmp, "t.db"), API_TOKEN="t",
-                   ALLOW_TODAY_OVERRIDE="1", CYCLE_ANCHOR=ANCHOR.isoformat(), GCS_BUCKET="", SLACK_BOT_TOKEN="")
-        env.update(extra)
+                   ALLOW_TODAY_OVERRIDE="1", CYCLE_ANCHOR=ANCHOR.isoformat(), GCS_BUCKET="",
+                   SLACK_SIGNING_SECRET="sec", SLACK_BOT_TOKEN="xoxb-test", SLACK_API_BASE=fake.base + "/api",
+                   ADMIN_SLACK_IDS="UA,UB")
         self.proc = subprocess.Popen([SERVER], env=env)
         for _ in range(100):
             try:
@@ -53,6 +100,26 @@ class Server:
             except OSError:
                 time.sleep(0.05)
         raise RuntimeError("server did not start")
+
+    def slack(self, path, form, ts=None, secret="sec", today=None):
+        body = urllib.parse.urlencode(form).encode()
+        ts = str(int(time.time())) if ts is None else str(ts)
+        sig = "v0=" + hmac.new(secret.encode(), b"v0:" + ts.encode() + b":" + body, hashlib.sha256).hexdigest()
+        return self.call("POST", path, body, token=None, today=today, headers={
+            "X-Slack-Request-Timestamp": ts, "X-Slack-Signature": sig,
+            "Content-Type": "application/x-www-form-urlencoded"})
+
+    def command(self, user, text, today=TODAY):
+        return self.slack("/slack/commands", {"user_id": user, "text": text, "trigger_id": "trig",
+                                              "response_url": self.fake.base + "/response"}, today=today)
+
+    def submit(self, user, item, count=1, period="day", other="", today=TODAY):
+        values = {"item": {"v": {"type": "static_select", "selected_option": {"value": str(item)}}},
+                  "other": {"v": {"type": "plain_text_input", "value": other or None}},
+                  "count": {"v": {"type": "static_select", "selected_option": {"value": str(count)}}},
+                  "period": {"v": {"type": "radio_buttons", "selected_option": {"value": period}}}}
+        payload = {"type": "view_submission", "user": {"id": user}, "view": {"state": {"values": values}}}
+        return self.slack("/slack/interactions", {"payload": json.dumps(payload)}, today=today)
 
     def stop(self):
         self.proc.terminate()
@@ -201,14 +268,110 @@ def test_cycles(s, jid, bid):
     check(any(o["id"] == bid for o in s.call("GET", "/api/home", today=TODAY)[1]["orders"]), "current paid on home")
 
 
+def test_slack(s, monster):
+    f = s.fake
+    exp = next_boundary_after(TODAY)
+    day = dt.timedelta(days=1)
+    for path in ("/slack/commands", "/slack/interactions"):
+        form = {"user_id": "U1", "text": "list", "payload": "{}"}
+        check(s.slack(path, form, secret="bad")[0] == 401, f"AC6 bad signature {path}")
+        check(s.slack(path, form, ts=int(time.time()) - 301)[0] == 401, f"AC6 stale timestamp {path}")
+        check(s.call("POST", path, b"text=list", token=None)[0] == 401, f"AC6 unsigned {path}")
+
+    # modal: active items + Outro, bot token, trigger id
+    f.take()
+    st, _ = s.command("U1", "")
+    opened = f.take("/api/views.open")
+    check(st == 200 and len(opened) == 1, "views.open called once")
+    body = opened[0]["body"]
+    opts = body["view"]["blocks"][0]["element"]["options"]
+    check(opened[0]["auth"] == "Bearer xoxb-test" and body["trigger_id"] == "trig", "views.open auth + trigger")
+    check(len(opts) == 30 and opts[-1]["value"] == "other", f"29 active items + Outro, got {len(opts)}")
+    f.fail_views_open = True
+    st, b = s.command("U1", "")
+    check(b == {"response_type": "ephemeral", "text": "Não consegui abrir o formulário, rode /dionisio de novo."},
+          f"views.open failure -> retry text {b}")
+    f.fail_views_open = False
+
+    # AC3 suggestions from a Slack preference; AC6 replace
+    def sug(today=TODAY):
+        home = s.call("GET", "/api/home", today=today)[1]
+        return next((x for x in home["suggestions"] if x["item_id"] == monster), None)
+
+    check(s.submit("U1", monster) == (200, ""), "create preference closes modal")
+    check(sug()["units"] == 10 and sug()["suggested"] == 2, f"AC3 1/day pack 6 -> 2 {sug()}")
+    s.call("POST", f"/api/items/{monster}", {"admin_min_packs": 3})
+    check(sug()["suggested"] == 3, "AC3 admin min 3 -> 3")
+    s.submit("U1", monster, count=2)
+    check(s.command("U1", "list")[1]["text"] == f"1. Monster Energy 2x/dia até {exp}\n", "AC6 replace via list")
+    check(sug()["units"] == 20, "replaced, not duplicated")
+    check(sug(exp)["units"] == 20 and sug(exp + day)["units"] == 0, "expiry inclusive of boundary day")
+
+    # archive: out of suggestions + modal, still listed, submissions rejected
+    s.call("POST", f"/api/items/{monster}", {"active": False})
+    check(sug() is None, "AC3 archived item leaves suggestions")
+    f.take()
+    s.command("U1", "")
+    values = [o["value"] for o in f.take("/api/views.open")[0]["body"]["view"]["blocks"][0]["element"]["options"]]
+    check(str(monster) not in values and len(values) == 29, "archived item leaves modal")
+    check(s.command("U1", "list")[1]["text"] == f"1. Monster Energy 2x/dia até {exp} (arquivado)\n", "archived listed")
+    st, b = s.submit("U1", monster)
+    check(b.get("response_action") == "errors" and "item" in b["errors"], "archived item submission rejected")
+    s.call("POST", f"/api/items/{monster}", {"active": True, "admin_min_packs": 0})
+
+    st, b = s.submit("U1", "other")
+    check(b == {"response_action": "errors", "errors": {"other": "Escreva o nome do item."}}, f"Other w/o text {b}")
+    st, b = s.submit("U1", monster, count=9, period="month")
+    check(set(b.get("errors", {})) == {"count", "period"}, f"count/period validation {b}")
+
+    # list/drop share ordering (expires_on, id)
+    s.submit("U9", "other", other="Zzz <!channel>")
+    s.submit("U9", monster, count=1, period="week")
+    check(s.command("U9", "list")[1]["text"] ==
+          f"1. Zzz &lt;!channel&gt; 1x/dia até {exp}\n2. Monster Energy 1x/semana até {exp}\n", "list order")
+    check(s.command("U9", "drop 1")[1]["text"] == f"Removida: Zzz &lt;!channel&gt; 1x/dia até {exp}", "drop 1")
+    check(s.command("U9", "list")[1]["text"] == f"1. Monster Energy 1x/semana até {exp}\n", "list after drop")
+    check(s.command("U9", "drop 5")[1]["text"].startswith("Não existe"), "drop out of range")
+    check(s.command("U9", "drop x")[1]["text"].startswith("Use /dionisio drop"), "drop usage")
+    check(s.command("U8", "list")[1]["text"].startswith("Você não tem"), "empty list")
+    check(s.command("U8", "help")[1]["text"].startswith("/dionisio:"), "help")
+
+    # AC5 new items ranked by distinct requesters
+    for u, t in (("U1", "Toddynho"), ("U2", "Toddynho"), ("U3", "  toddynho "), ("U4", "Paçoca")):
+        s.submit(u, "other", other=t)
+    reqs = s.call("GET", "/api/requests", today=TODAY)[1]
+    check(reqs == [{"text": "Toddynho", "requesters": 3}, {"text": "Paçoca", "requesters": 1}], f"AC5 {reqs}")
+    check(s.call("GET", "/api/requests", today=exp + day)[1] == [], "requests expire")
+
+    # Renovar button: owner only (pref 1 = U1's Monster), response_url replace_original
+    def click(user, today):
+        payload = {"type": "block_actions", "user": {"id": user}, "response_url": f.base + "/response",
+                   "actions": [{"action_id": "renew", "value": "1"}]}
+        return s.slack("/slack/interactions", {"payload": json.dumps(payload)}, today=today)
+
+    f.take()
+    check(click("U2", exp - 2 * day)[0] == 200 and f.take("/response") == [], "renew by non-owner ignored")
+    check(s.command("U1", "list")[1]["text"].endswith(f"até {exp}\n"), "non-owner did not renew")
+    click("U1", exp - 2 * day)
+    renewed = next_boundary_after(exp)
+    sent = f.take("/response")
+    check(len(sent) == 1 and sent[0]["body"] == {"replace_original": True,
+                                                 "text": f"Renovada: Monster Energy 2x/dia até {renewed}"},
+          f"renew response_url {sent}")
+    check(s.command("U1", "list")[1]["text"] ==
+          f"1. Toddynho 1x/dia até {exp}\n2. Monster Energy 2x/dia até {renewed}\n", "renewed, list re-ordered")
+    s.command("U1", "drop 2")  # leave Monster demand-free for later tests
+
+
 def main():
-    s = Server()
+    s = Server(FakeSlack())
     try:
         test_auth(s)
         jid, bid = test_import(s)
         test_dedup(s)
         test_checklist(s, jid, bid)
-        test_items(s)
+        monster = test_items(s)
+        test_slack(s, monster)
         test_cycles(s, jid, bid)
     finally:
         s.stop()
