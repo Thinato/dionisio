@@ -35,7 +35,12 @@ if(EXISTS ${CMAKE_SOURCE_DIR}/src/server/main.cpp)
   file(GLOB SERVER_SRC CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/src/server/*.cpp)
   add_executable(dionisio-server ${SERVER_SRC})
   target_include_directories(dionisio-server SYSTEM PRIVATE ${httplib_SOURCE_DIR})
-  target_link_libraries(dionisio-server PRIVATE core SQLite::SQLite3 OpenSSL::Crypto Threads::Threads)
+  if(TARGET SQLite3::SQLite3)  # CMake >= 4.3 renamed it
+    set(SQLITE_TARGET SQLite3::SQLite3)
+  else()
+    set(SQLITE_TARGET SQLite::SQLite3)
+  endif()
+  target_link_libraries(dionisio-server PRIVATE core ${SQLITE_TARGET} OpenSSL::Crypto Threads::Threads)
 
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   foreach(t api gcs)
