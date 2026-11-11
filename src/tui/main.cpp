@@ -47,7 +47,7 @@ struct Tui {
   int tab = 0, cur[5] = {0, 0, 0, 0, 0};
   std::string status = "ready";
   bool status_err = false;
-  json home, items = json::array(), reqs = json::array(), cycles = json::array();
+  json home = json::object(), items = json::array(), reqs = json::array(), cycles = json::array();
   // order screen
   json order;
   std::map<int, std::string> dirty;  // line id -> arrival
