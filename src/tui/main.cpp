@@ -62,6 +62,11 @@ struct Tui {
     fields[k] = v.empty() ? json(nullptr) : json(v);
   }
 
+  std::string bstr(const char* k) const {  // null -> ""
+    auto& v = order["boleto"][k];
+    return v.is_string() ? v.get<std::string>() : "";
+  }
+
   bool unsaved() const { return !dirty.empty() || !fields.empty(); }
 
   json get(const std::string& path) {
@@ -106,7 +111,7 @@ struct Tui {
   long long amount() const {
     std::vector<LineState> ls;
     for (auto& l : order["lines"]) ls.push_back({l.value("price_cents", 0), arrival(l)});
-    return amount_due(order.value("total", 0), ls);
+    return amount_due(order.value("total_cents", 0), ls);
   }
 
   bool save() {
@@ -147,12 +152,14 @@ struct Tui {
       case 1: return order.is_object() ? (int)order["lines"].size() : 0;
       case 2: return (int)items.size();
       case 3: return (int)reqs.size();
-      default: { int n = 0; for (auto& c : cycles) n += (int)c["orders"].size(); return n; }
+      default: { int n = 0; for (auto& c : cycles) if (past(c)) n += (int)c["orders"].size(); return n; }
     }
   }
 
-  json cycle_order(int idx, std::string* start = nullptr) const {
-    for (auto& c : cycles) for (auto& o : c["orders"]) if (idx-- == 0) { if (start) *start = c.value("start", ""); return o; }
+  bool past(const json& c) const { return c.value("start", "") != home.value("cycle", json::object()).value("start", ""); }
+
+  json cycle_order(int idx) const {
+    for (auto& c : cycles) if (past(c)) for (auto& o : c["orders"]) if (idx-- == 0) return o;
     return nullptr;
   }
 
@@ -183,9 +190,9 @@ struct Tui {
       else if (e == Event::Backspace || e == Event::Delete) dirty[id] = "missing";
       else if (e == Event::Character('p')) dirty[id] = "pending";
       else if (e == Event::Escape) goto_tab(0);
-      else if (e == Event::Character('d')) ask("due date YYYY-MM-DD", order["boleto"].value("due_date", ""), [this](auto& v) { setdate("due_date", v); });
-      else if (e == Event::Character('l')) ask("linha digitavel", order["boleto"].value("linha", ""), [this](auto& v) { fields["linha_digitavel"] = v; });
-      else if (e == Event::Character('b')) ask("paid on YYYY-MM-DD", order["boleto"].value("paid_on", ""), [this](auto& v) { setdate("paid_on", v); });
+      else if (e == Event::Character('d')) ask("due date YYYY-MM-DD", bstr("due_date"), [this](auto& v) { setdate("due_date", v); });
+      else if (e == Event::Character('l')) ask("linha digitavel", bstr("linha_digitavel"), [this](auto& v) { fields["linha_digitavel"] = v; });
+      else if (e == Event::Character('b')) ask("paid on YYYY-MM-DD", bstr("paid_on"), [this](auto& v) { setdate("paid_on", v); });
     } else if (tab == 2 && n > 0) {
       json it = items[c];
       auto num = [this, it](const char* key, const std::string& what) {
@@ -212,7 +219,7 @@ struct Tui {
 
   Element boleto(const json& b) const {
     std::string due = b.contains("due_date") && !b["due_date"].is_null() ? b["due_date"].get<std::string>() : "no due date";
-    std::string s = money(b.value("amount_due", json())) + "  due " + due;
+    std::string s = money(b.value("amount_due_cents", json())) + "  due " + due;
     if (b.contains("paid_on") && !b["paid_on"].is_null()) return text(s + "  paid " + b["paid_on"].get<std::string>()) | color(Color::Green);
     if (b.value("overdue", false)) return text(s + "  OVERDUE") | color(Color::Red);
     return text(s);
@@ -250,7 +257,7 @@ struct Tui {
         if (fields.contains(fk)) return fields[fk].get<std::string>() + " *";
         return b.contains(k) && !b[k].is_null() ? b[k].get<std::string>() : std::string("-");
       };
-      rows.push_back(t("due(d) " + fv("due_date", "due_date") + "   linha(l) " + fv("linha", "linha_digitavel") + "   paid(b) " + fv("paid_on", "paid_on")));
+      rows.push_back(t("due(d) " + fv("due_date", "due_date") + "   linha(l) " + fv("linha_digitavel", "linha_digitavel") + "   paid(b) " + fv("paid_on", "paid_on")));
       int i = 0;
       for (auto& l : order["lines"]) {
         std::string a = arrival(l);
@@ -273,10 +280,11 @@ struct Tui {
     } else {
       int i = 0;
       for (auto& cy : cycles) {
+        if (!past(cy)) continue;
         rows.push_back(t("Cycle " + cy.value("start", "")) | bold);
         for (auto& o : cy["orders"]) {
-          rows.push_back(row(t(" " + o.value("supplier", "") + "  total " + money(o["total"]) + "  due " + money(o["amount_due"]) +
-                               (o["paid_on"].is_null() ? "" : "  paid " + o["paid_on"].get<std::string>())), i++ == c));
+          rows.push_back(row(t(" " + o.value("supplier", "") + "  total " + money(o["total_cents"]) + "  due " + money(o["boleto"]["amount_due_cents"]) +
+                               (o["boleto"]["paid_on"].is_null() ? "" : "  paid " + o["boleto"]["paid_on"].get<std::string>())), i++ == c));
         }
       }
     }
@@ -309,7 +317,11 @@ int main(int argc, char** argv) {
   app.refresh();
   auto screen = ScreenInteractive::Fullscreen();
   auto ui = Renderer([&] { return app.view(); }) | CatchEvent([&](Event e) {
-    if (!app.key(e)) screen.Exit();
+    try {
+      if (!app.key(e)) screen.Exit();
+    } catch (const std::exception& x) {  // unexpected JSON shape: show, don't die
+      app.status_err = true; app.status = std::string("internal: ") + x.what();
+    }
     return true;
   });
   screen.Loop(ui);
