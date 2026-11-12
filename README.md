@@ -72,7 +72,7 @@ gcloud storage buckets update gs://$BUCKET --lifecycle-file=lifecycle.json
 
 # 3. Artifact Registry, keep 3 images
 gcloud artifacts repositories create dionisio --repository-format docker --location us-central1 --project $PROJECT_ID
-echo '[{"name":"keep-3","action":{"type":"Keep"},"mostRecentVersions":{"keepCount":3}}]' > cleanup.json
+echo '[{"name":"keep-3","action":{"type":"Keep"},"mostRecentVersions":{"keepCount":3}},{"name":"delete-old","action":{"type":"Delete"},"condition":{"tagState":"ANY"}}]' > cleanup.json
 gcloud artifacts repositories set-cleanup-policies dionisio --location us-central1 --policy cleanup.json --no-dry-run --project $PROJECT_ID
 
 # 4. Secrets. The API token is random; keep $API_TOKEN for the TUI and the Scheduler job (step 10).
