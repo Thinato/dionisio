@@ -1,0 +1,173 @@
+{
+  "placed": "9 nov",
+  "orderId": "71205254322071e20101",
+  "status": "Em processo",
+  "customer": "BRICK TECNOLOGIA LTDA",
+  "business": "BRICK CORRET",
+  "orderNumber": "4063148251",
+  "delivery": "10 nov 2026",
+  "deliveryDate": "2026-11-10",
+  "items": [
+    {
+      "name": "Monster Ultra",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 49.2,
+      "totalPrice": 49.2
+    },
+    {
+      "name": "Monster Energy",
+      "quantity": 2,
+      "unit": "Peça",
+      "unitPrice": 49.2,
+      "totalPrice": 98.4
+    },
+    {
+      "name": "Monster Energy Zero Açúcar",
+      "quantity": 3,
+      "unit": "Peça",
+      "unitPrice": 49.2,
+      "totalPrice": 147.6
+    },
+    {
+      "name": "Leão Ice Tea Limão Zero",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 18.54,
+      "totalPrice": 18.54
+    },
+    {
+      "name": "Leão Ice Tea Pêssego Zero",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 18.54,
+      "totalPrice": 18.54
+    },
+    {
+      "name": "Monster Mango Loco",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 49.2,
+      "totalPrice": 49.2
+    },
+    {
+      "name": "Monster Pacific Punch",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 49.2,
+      "totalPrice": 49.2
+    },
+    {
+      "name": "Leão Chá Verde Limão Zero",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 18.54,
+      "totalPrice": 18.54
+    },
+    {
+      "name": "Monster Strawberry",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 49.2,
+      "totalPrice": 49.2
+    },
+    {
+      "name": "Eisenbahn Unfiltered",
+      "quantity": 4,
+      "unit": "Peça",
+      "unitPrice": 28.14,
+      "totalPrice": 112.56
+    },
+    {
+      "name": "Pettiz Special Amendoim Japonês",
+      "quantity": 2,
+      "unit": "Peça",
+      "unitPrice": 46.6,
+      "totalPrice": 93.2
+    },
+    {
+      "name": "Pettiz Amendoim Torrado & Salgado Sem Pele",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 46.6,
+      "totalPrice": 46.6
+    },
+    {
+      "name": "Amor Paçoca Quadrada",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 17.7,
+      "totalPrice": 17.7
+    },
+    {
+      "name": "Sprite Zero Açúcar",
+      "quantity": 3,
+      "unit": "Peça",
+      "unitPrice": 18.06,
+      "totalPrice": 54.19
+    },
+    {
+      "name": "Fanta Uva",
+      "quantity": 2,
+      "unit": "Peça",
+      "unitPrice": 18.06,
+      "totalPrice": 36.12
+    },
+    {
+      "name": "Coca-Cola Zero Açúcar",
+      "quantity": 2,
+      "unit": "Peça",
+      "unitPrice": 20.4,
+      "totalPrice": 40.8
+    },
+    {
+      "name": "Fanta Laranja Zero Açúcar",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 18.06,
+      "totalPrice": 18.06
+    },
+    {
+      "name": "Coca-Cola Café Espresso",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 13.15,
+      "totalPrice": 13.15
+    },
+    {
+      "name": "Schweppes Citrus",
+      "quantity": 2,
+      "unit": "Peça",
+      "unitPrice": 20.4,
+      "totalPrice": 40.8
+    },
+    {
+      "name": "Fanta Maracujá",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 18.06,
+      "totalPrice": 18.06
+    },
+    {
+      "name": "Fanta Mistério Ghost Face",
+      "quantity": 1,
+      "unit": "Peça",
+      "unitPrice": 18.06,
+      "totalPrice": 18.06
+    }
+  ],
+  "itemCount": 21,
+  "totalQuantity": 33,
+  "payment": [
+    {
+      "method": "À Vista",
+      "amount": 1007.72
+    }
+  ],
+  "summary": {
+    "subtotal": 1007.72,
+    "discount": 0,
+    "financialCharges": 0,
+    "total": 1007.72
+  }
+}

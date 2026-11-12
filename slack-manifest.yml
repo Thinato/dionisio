@@ -1,0 +1,30 @@
+display_information:
+  name: Dionisio
+  description: Snack and beverage preferences
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: true
+  bot_user:
+    display_name: Dionisio
+    always_online: false
+  slash_commands:
+    - command: /dionisio
+      url: https://YOUR-RUN-URL/slack/commands
+      description: Set your snack and drink preferences
+      usage_hint: "[list | drop <n> | help]"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - commands
+      - chat:write
+      - im:write
+settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://YOUR-RUN-URL/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
