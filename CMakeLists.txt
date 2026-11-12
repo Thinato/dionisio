@@ -34,6 +34,8 @@ endif()
 find_package(OpenSSL REQUIRED)
 add_executable(dionisio-server src/server/main.cpp src/server/db.cpp src/server/slack.cpp src/server/gcs.cpp)
 target_include_directories(dionisio-server SYSTEM PRIVATE ${httplib_SOURCE_DIR})
+# Slack interaction payloads (view_submission echoes the whole modal) exceed httplib's 8 KB form default.
+target_compile_definitions(dionisio-server PRIVATE CPPHTTPLIB_FORM_URL_ENCODED_PAYLOAD_MAX_LENGTH=1048576)
 if(TARGET SQLite3::SQLite3)  # CMake >= 4.3 renamed it
   set(SQLITE_TARGET SQLite3::SQLite3)
 else()
