@@ -284,6 +284,12 @@ int main() {
       reply(res, 500, {{"error", "internal error"}});
     }
   });
+  // Slack hides our error bodies from the user; surface the reason for rejected Slack calls in Cloud Run logs.
+  svr.set_logger([](const Request& req, const Response& res) {
+    if (res.status >= 400 && req.path.rfind("/slack/", 0) == 0)
+      std::fprintf(stderr, "%s %s -> %d (%zu bytes): %.300s\n", req.method.c_str(), req.path.c_str(), res.status,
+                   req.body.size(), res.body.c_str());
+  });
 
   svr.Get("/api/home", [](const Request& req, Response& res) {
     reply(res, 200, db([&] { return home_json(today_of(req)); }));

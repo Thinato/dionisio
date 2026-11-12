@@ -118,7 +118,11 @@ class Server:
                   "other": {"v": {"type": "plain_text_input", "value": other or None}},
                   "count": {"v": {"type": "static_select", "selected_option": {"value": str(count)}}},
                   "period": {"v": {"type": "radio_buttons", "selected_option": {"value": period}}}}
-        payload = {"type": "view_submission", "user": {"id": user}, "view": {"state": {"values": values}}}
+        # Real Slack echoes the whole modal (every catalogue option) back, so bodies run well past 8 KB.
+        blocks = [{"type": "input", "element": {"type": "static_select", "options": [
+            {"text": {"type": "plain_text", "text": f"Catalogue item number {i}"}, "value": str(i)} for i in range(100)]}}]
+        payload = {"type": "view_submission", "user": {"id": user},
+                   "view": {"blocks": blocks, "state": {"values": values}}}
         return self.slack("/slack/interactions", {"payload": json.dumps(payload)}, today=today)
 
     def stop(self):

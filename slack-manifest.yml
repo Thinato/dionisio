@@ -1,30 +1,39 @@
 display_information:
   name: Dionisio
-  description: Snack and beverage preferences
+  description: Mestre das bebidas e snacks
+  background_color: "#d45800"
 features:
   app_home:
-    home_tab_enabled: false
+    home_tab_enabled: true
     messages_tab_enabled: true
-    messages_tab_read_only_enabled: true
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: Dionisio
-    always_online: false
+    always_online: true
   slash_commands:
     - command: /dionisio
-      url: https://YOUR-RUN-URL/slack/commands
-      description: Set your snack and drink preferences
-      usage_hint: "[list | drop <n> | help]"
+      description: Defina suas preferências de bebidas e snacks
       should_escape: false
+      url: https://YOUR-RUN-URL/slack/commands
+      usage_hint: "[list | drop <n> | help]"
 oauth_config:
   scopes:
     bot:
-      - commands
+      - im:history
       - chat:write
+      - chat:write.public
+      - commands
       - im:write
+      - users:read
+      - im:read
+      - app_mentions:read
+  pkce_enabled: false
 settings:
   interactivity:
     is_enabled: true
     request_url: https://YOUR-RUN-URL/slack/interactions
   org_deploy_enabled: false
   socket_mode_enabled: false
+  is_mcp_enabled: false
   token_rotation_enabled: false
+  app_level_token_rotation_enabled: false
