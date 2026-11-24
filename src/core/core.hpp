@@ -51,12 +51,20 @@ struct Pref {
   int count;
   std::string period;  // "day" | "week"
 };
+// From a fridge count taken this cycle, all in units. usage = last cycle's consumption (previous count +
+// delivered since - this count), nullopt without one.
+struct Stock {
+  int on_hand, incoming;
+  std::optional<int> usage;
+};
 struct Suggestion {
   int units;
   std::optional<int> packs;  // nullopt when pack size unknown
   int suggested;             // max(admin_min, packs); raw units when pack size unknown
 };
-Suggestion suggest(const std::vector<Pref>& prefs, std::optional<int> pack_size, int admin_min_packs);
+// With stock: packs = ceil((max(units, usage) - on_hand - incoming) / pack), never below 0.
+Suggestion suggest(const std::vector<Pref>& prefs, std::optional<int> pack_size, int admin_min_packs,
+                   std::optional<Stock> stock = std::nullopt);
 
 // Alert windows (a missed run is backfilled). kind matches notifications.kind.
 struct Alert {

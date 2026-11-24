@@ -46,7 +46,9 @@ export DIONISIO_URL=https://YOUR-RUN-URL DIONISIO_TOKEN=<API_TOKEN>
 ./build/dionisio                                                      # open the UI
 ```
 
-Tabs: Home (suggestions, orders, Boletos), Order checklist (Enter = arrived, Backspace/Delete = missing, `p` = pending, `s` or leaving the screen saves), Catalogue (pack size, minimum, active), New items, Past cycles.
+Tabs: Home (suggestions, orders, Boletos), Order checklist (Enter = arrived, Backspace/Delete = missing, `p` = pending, `s` or leaving the screen saves), Catalogue (pack size, minimum, active), New items, Past cycles, Count (fridge count: Enter, type units, Enter moves to the next row; `s` saves).
+
+Count the fridge before each order. Once an item has a count this cycle, its suggestion becomes `max(Slack demand, used) - on hand - coming`, rounded up to boxes and never below the minimum. `used` is the last count plus units delivered since minus this count. `coming` is units ordered but not delivered yet (missing lines excluded). For the first count, Dionisio assumes the fridge was empty when the previous cycle started. Items without a pack size, or without a count this cycle, keep the Slack-only suggestion.
 
 ## Juntos+ cart import
 

@@ -151,7 +151,7 @@ class Server:
 
 def test_auth(s):
     routes = [("GET", "/api/home"), ("POST", "/api/orders"), ("GET", "/api/orders/1"), ("POST", "/api/orders/1"),
-              ("GET", "/api/items"), ("POST", "/api/items/1"), ("GET", "/api/requests"), ("GET", "/api/cycles"),
+              ("GET", "/api/items"), ("POST", "/api/items/1"), ("POST", "/api/counts"), ("GET", "/api/requests"), ("GET", "/api/cycles"),
               ("POST", "/jobs/daily"), ("GET", "/api/nope")]
     for m, p in routes:
         body = b"{}" if m == "POST" else None
@@ -505,6 +505,50 @@ def test_daily(s):
     check(r6(dt.date(2026, 12, 7)) == [], "renew24 once per cycle")
 
 
+def test_counts(s):
+    later = dt.date(2026, 11, 25)  # cycle 2026-11-23; the BEES fixture (3 boxes of 12 Água) arrived 2026-11-10
+    agua = next(i for i in s.call("GET", "/api/items")[1] if i["sku"] == "0006905")
+
+    def sug(today=later):
+        return next(x for x in s.call("GET", "/api/home", today=today)[1]["suggestions"] if x["item_id"] == agua["id"])
+
+    check(sug()["counted_on"] is None and sug()["usage"] is None and sug()["suggested"] == 0, f"no count {sug()}")
+    for bad in ({}, {"units": {}}, {"units": {str(agua["id"]): -1}}, {"units": {str(agua["id"]): "6"}},
+                {"units": {"x": 1}}, {"units": {str(agua["id"]): 1}, "counted_on": "2026-02-30"}):
+        check(s.call("POST", "/api/counts", bad, today=later)[0] == 400, f"count 400 for {bad}")
+    check(s.call("POST", "/api/counts", {"units": {"999": 1}}, today=later)[0] == 404, "count unknown item 404")
+
+    check(s.call("POST", "/api/counts", {"units": {str(agua["id"]): 1}, "counted_on": "2026-11-26"}, today=later)[0] == 400,
+          "future count 400")
+    st, b = s.call("POST", "/api/counts", {"units": {str(agua["id"]): 9}}, today=later)
+    check(st == 200 and b["counted_on"] == "2026-11-25", f"count defaults to today {st} {b}")
+    s.call("POST", "/api/counts", {"units": {str(agua["id"]): 6}}, today=later)  # same day: overwrite
+    x = sug()
+    # first count: used 36 - 6 = 30 over 15 days since the 11-10 delivery -> 28 per cycle; need 28 - 6 = 22 -> 2 boxes
+    check(x["on_hand"] == 6 and x["usage"] == 28 and x["incoming"] == 0 and x["suggested"] == 2, f"count {x}")
+    s.call("POST", "/api/counts", {"units": {str(agua["id"]): 20}, "counted_on": "2026-11-23"}, today=later)
+    check(sug()["usage"] == 28, f"a count under 7 days old is not a usage baseline {sug()}")
+
+    base = json.loads(BEES)
+    agua_line = [i for i in base["items"] if i["sku"] == "0006905"]
+    undated = dict(base, orderId="count-0", deliveryDate=None, items=[dict(agua_line[0], quantity=1)])
+    check(s.call("POST", "/api/orders", json.dumps(undated).encode(), today=later)[0] == 201, "import undated order")
+    x = sug()
+    check(x["incoming"] == 12 and x["usage"] == 28 and x["suggested"] == 1, f"undated order on count day is coming {x}")
+    more = dict(base, orderId="count-1", deliveryDate="2026-11-27", items=agua_line)
+    check(s.call("POST", "/api/orders", json.dumps(more).encode(), today=later)[0] == 201, "import incoming order")
+    x = sug()
+    check(x["incoming"] == 48 and x["suggested"] == 0, f"incoming orders cover it {x}")
+
+    nxt = dt.date(2026, 12, 8)  # next cycle: the count is stale, back to demand only
+    x = sug(nxt)
+    check(x["on_hand"] == 6 and x["usage"] is None and x["suggested"] == 0, f"stale count ignored {x}")
+    s.call("POST", "/api/counts", {"units": {str(agua["id"]): 30}}, today=nxt)
+    x = sug(nxt)
+    # 6 + 48 delivered - 30 = 24 over 13 days -> 26 per cycle; 30 on hand covers it
+    check(x["usage"] == 26 and x["incoming"] == 0 and x["suggested"] == 0, f"second cycle {x}")
+
+
 def main():
     s = Server(FakeSlack())
     try:
@@ -515,6 +559,7 @@ def main():
         monster = test_items(s)
         test_slack(s, monster)
         test_cycles(s, jid, bid)
+        test_counts(s)
     finally:
         s.stop()
     s = Server(s.fake)

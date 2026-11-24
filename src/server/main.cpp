@@ -167,6 +167,32 @@ static void post_item(const Request& req, Response& res) {
   reply(res, out.first, out.second);
 }
 
+// Fridge count. {"units": {"<item_id>": int 0..99999}, "counted_on"?: date (default today)}; recounting the
+// same day overwrites.
+static void post_counts(const Request& req, Response& res) {
+  json b = json::parse(req.body);
+  if (!b.is_object() || !b.contains("units") || !b["units"].is_object() || b["units"].empty())
+    return reply(res, 400, {{"error", "expected {\"units\": {\"<item_id>\": n}}"}});
+  std::string on = b.contains("counted_on") && b["counted_on"].is_string() ? b["counted_on"].get<std::string>() : iso(today_of(req));
+  if (!valid_date(on) || *parse_date(on) > today_of(req)) return reply(res, 400, {{"error", "invalid counted_on"}});
+  for (auto& [id, n] : b["units"].items())
+    if (id.empty() || id.size() > 18 || id.find_first_not_of("0123456789") != std::string::npos ||
+        !n.is_number_integer() || n.get<int64_t>() < 0 || n.get<int64_t>() > 99999)
+      return reply(res, 400, {{"error", "invalid count for item " + id}});
+  auto out = db([&]() -> std::pair<int, json> {
+    for (auto& [id, n] : b["units"].items())
+      if (q("SELECT 1 FROM items WHERE id = ?", {std::stoll(id)}).empty()) return {404, {{"error", "item " + id + " not found"}}};
+    tx([&] {
+      for (auto& [id, n] : b["units"].items())
+        q("INSERT INTO counts (item_id, counted_on, units) VALUES (?, ?, ?) "
+          "ON CONFLICT (item_id, counted_on) DO UPDATE SET units = excluded.units WHERE units <> excluded.units",
+          {std::stoll(id), on, n});
+    });
+    return {200, {{"counted_on", on}, {"items", b["units"].size()}}};
+  });
+  reply(res, out.first, out.second);
+}
+
 // Daily 09:00 job: collect (under lock) -> send (no lock) -> record (under lock). Any failed send -> 500 so
 // Scheduler retries; the notifications PK dedups what already went out.
 static void daily(const Request& req, Response& res) {
@@ -312,6 +338,7 @@ int main() {
   svr.Post(R"(/api/orders/(\d{1,18}))", mut(post_order));
   svr.Get("/api/items", [](const Request&, Response& res) { reply(res, 200, db(items_json)); });
   svr.Post(R"(/api/items/(\d{1,18}))", mut(post_item));
+  svr.Post("/api/counts", mut(post_counts));
   svr.Get("/api/requests", [](const Request& req, Response& res) {
     reply(res, 200, db([&] { return requests_json(today_of(req)); }));
   });

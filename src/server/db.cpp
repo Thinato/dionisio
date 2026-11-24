@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS preferences (
   CHECK ((item_id IS NULL) <> (other_text IS NULL)));
 CREATE UNIQUE INDEX IF NOT EXISTS pref_item  ON preferences(slack_user_id, item_id)    WHERE item_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS pref_other ON preferences(slack_user_id, other_norm) WHERE other_norm IS NOT NULL;
+CREATE TABLE IF NOT EXISTS counts (
+  item_id INTEGER NOT NULL REFERENCES items(id),
+  counted_on TEXT NOT NULL,
+  units INTEGER NOT NULL CHECK (units >= 0),
+  PRIMARY KEY (item_id, counted_on));
 CREATE TABLE IF NOT EXISTS notifications (
   kind TEXT NOT NULL,
   ref_id INTEGER NOT NULL,
@@ -63,6 +68,10 @@ CREATE TABLE IF NOT EXISTS notifications (
 void open_db() {
   if (sqlite3_open(g_db_path.c_str(), &g_db) != SQLITE_OK)
     throw std::runtime_error("open " + g_db_path + ": " + sqlite3_errmsg(g_db));
+  apply_schema();
+}
+
+void apply_schema() {
   char* err = nullptr;
   if (sqlite3_exec(g_db, kSchema, nullptr, nullptr, &err) != SQLITE_OK) {
     std::string msg = err ? err : "schema failed";
@@ -159,7 +168,39 @@ json home_json(Date today) {
     int64_t id = it["id"];
     std::optional<int> pack;
     if (!it["pack_size"].is_null()) pack = it["pack_size"].get<int>();
-    auto s = suggest(demand[id], pack, it["admin_min_packs"].get<int>());
+    auto counts = q("SELECT counted_on, units FROM counts WHERE item_id = ? ORDER BY counted_on DESC LIMIT 10", {id});
+    std::optional<Stock> stock;
+    if (pack && !counts.empty() && counts[0]["counted_on"].get<std::string>() >= iso(cs)) {
+      // When an order's units reach the fridge: its delivery date, else the day after import (a count taken the
+      // day you import is before it arrives). Pending lines of this cycle's orders are always still coming.
+      static const std::string arrives = "COALESCE(o.delivery_date, date(o.imported_at, '+1 day'))";
+      static const std::string coming = "(l.arrival = 'pending' AND o.cycle_start = ?)";
+      static const std::string from = " FROM order_lines l JOIN orders o ON o.id = l.order_id WHERE l.item_id = ? AND l.arrival <> 'missing' AND ";
+      auto units = [&](const json& r) { return (int)std::min<int64_t>(r["n"].get<int64_t>() * *pack, 1000000); };
+      std::string last = counts[0]["counted_on"];
+      Date last_d = *parse_date(last);
+      int on_hand = counts[0]["units"];
+      int incoming = units(q("SELECT COALESCE(SUM(l.qty), 0) AS n" + from + "(" + arrives + " > ? OR " + coming + ")",
+                             {id, last, iso(cs)})[0]);
+      // Usage = previous count + delivered since - this count, scaled to one 14-day cycle. A previous count under
+      // 7 days old is skipped (too short to measure). With none, assume the fridge was empty when the first
+      // delivery of the previous cycle arrived.
+      const json* prev = nullptr;
+      for (size_t i = 1; i < counts.size() && !prev; i++)
+        if ((last_d - *parse_date(counts[i]["counted_on"].get<std::string>())).count() >= 7) prev = &counts[i];
+      std::string after = prev ? (*prev)["counted_on"].get<std::string>() : iso(cs - std::chrono::days{15});
+      json d = q("SELECT COALESCE(SUM(l.qty), 0) AS n, MIN(" + arrives + ") AS first" + from + arrives + " > ? AND " +
+                     arrives + " <= ? AND NOT " + coming, {id, after, last, iso(cs)})[0];
+      std::optional<int> usage;
+      std::string since = prev ? after : d["first"].is_string() ? d["first"].get<std::string>() : "";
+      if (!since.empty()) {
+        int raw = std::max(0, (prev ? (*prev)["units"].get<int>() : 0) + units(d) - on_hand);
+        int days = std::max(7, (int)(last_d - *parse_date(since)).count());
+        usage = (raw * 14 + days / 2) / days;
+      }
+      stock = Stock{on_hand, incoming, usage};
+    }
+    auto s = suggest(demand[id], pack, it["admin_min_packs"].get<int>(), stock);
     sugg.push_back({{"item_id", id},
                     {"item", it["name"]},
                     {"supplier", it["supplier"]},
@@ -169,7 +210,11 @@ json home_json(Date today) {
                     {"admin_min", it["admin_min_packs"]},
                     {"suggested", s.suggested},
                     {"unknown_pack", !pack},
-                    {"missing_last_delivery", missing.count(id) > 0}});
+                    {"missing_last_delivery", missing.count(id) > 0},
+                    {"counted_on", counts.empty() ? json(nullptr) : counts[0]["counted_on"]},
+                    {"on_hand", counts.empty() ? json(nullptr) : counts[0]["units"]},
+                    {"incoming", stock ? json(stock->incoming) : json(nullptr)},
+                    {"usage", stock && stock->usage ? json(*stock->usage) : json(nullptr)}});
   }
   json orders = json::array();
   for (auto& r : q("SELECT id FROM orders WHERE cycle_start = ? OR paid_on IS NULL ORDER BY cycle_start, id",

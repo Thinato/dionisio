@@ -61,7 +61,7 @@ const Color acc = Color::RGB(245, 158, 76), blue = Color::RGB(127, 178, 255), gr
 }
 static const char* kGap = "   ";  // fixed space between table columns
 static const char* kSpin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
-static const char* kTabs[] = {"⌂ 1 Home", "☑ 2 Order", "▤ 3 Catalogue", "✚ 4 New items", "↺ 5 Past cycles"};
+static const char* kTabs[] = {"⌂ 1 Home", "☑ 2 Order", "▤ 3 Catalogue", "✚ 4 New items", "↺ 5 Past cycles", "# 6 Count"};
 
 static size_t u8len(const std::string& s) {
   size_t n = 0;
@@ -123,7 +123,7 @@ struct Banner {
 };
 
 struct Tui {
-  int tab = 0, cur[5] = {0, 0, 0, 0, 0};
+  int tab = 0, cur[6] = {0, 0, 0, 0, 0, 0};
   json home = json::object(), items = json::array(), reqs = json::array(), cycles = json::array();
   std::set<std::string> loaded;
   std::optional<Clock::time_point> updated;
@@ -137,7 +137,7 @@ struct Tui {
   Color status_color = th::dim;
   std::optional<Banner> err;
   bool help = false, show_idle = false, only_unknown = false, only_archived = false;
-  std::string filter[5];
+  std::string filter[6];
 
   // order screen
   json order;
@@ -149,6 +149,10 @@ struct Tui {
   // catalogue editor
   struct Editor { int64_t id = 0; std::optional<int> pack; int min = 0; bool active = true; int field = 0; bool typed = false; };
   std::optional<Editor> ed;
+
+  // fridge count: item id -> digits typed, not saved yet
+  std::map<int64_t, std::string> tally;
+  bool quit_warned = false;
 
   // one-line prompt
   bool editing = false;
@@ -224,10 +228,11 @@ struct Tui {
     else if (tab == 1) { if (order.is_object()) load_order(at(order, "id").get<int>()); }
     else if (tab == 2) load_items();
     else if (tab == 3) load_reqs();
-    else { load_home(); load_cycles(); }
+    else if (tab == 4) { load_home(); load_cycles(); }
+    else load_home();
   }
   std::string tab_key() const {
-    static const char* k[] = {"home", "order", "catalogue", "new items", "past cycles"};
+    static const char* k[] = {"home", "order", "catalogue", "new items", "past cycles", "home"};  // Count reads /api/home
     return k[tab];
   }
 
@@ -374,6 +379,42 @@ struct Tui {
     });
   }
 
+  // ---- count -----------------------------------------------------------------------------------
+  std::vector<json> count_rows() const {
+    std::vector<json> v;
+    for (auto& g : home.value("suggestions", json::array()))
+      if (match(5, sstr(g, "item") + " " + sstr(g, "supplier"))) v.push_back(g);
+    return v;
+  }
+  // Prompt for the selected row; ⏎ stores it and prompts for the next row, so a whole count is "n ⏎ n ⏎ …".
+  void ask_count() {
+    auto v = count_rows();
+    if (cur[5] >= (int)v.size()) return;
+    int64_t id = at(v[cur[5]], "item_id").get<int64_t>();
+    auto t = tally.find(id);
+    ask("units of " + sstr(v[cur[5]], "item") + " (empty skips)", t != tally.end() ? t->second : "", [this, id](auto& s) {
+      if (s.size() > 5 || s.find_first_not_of("0123456789") != std::string::npos) return ok("▲ units: a whole number", th::yellow);
+      if (s.empty()) tally.erase(id);
+      else tally[id] = std::to_string(std::stoi(s));
+      if (cur[5] + 1 < list_size()) { move(1); ask_count(); }  // last statement: ask() replaces this lambda
+    });
+  }
+  void save_counts() {
+    if (tally.empty()) return ok("nothing to save: type the units on hand first", th::dim);
+    json units = json::object();
+    for (auto& [id, d] : tally) units[std::to_string(id)] = std::stoi(d);
+    request("save", "/api/counts", json{{"units", units}}.dump(), [this, units](const HttpResp& r) {
+      if (r.status / 100 != 2) return failed("Couldn't save the count", r, [this] { save_counts(); });
+      for (auto& kv : units.items()) {  // keep anything retyped while saving
+        auto it = tally.find(std::stoll(kv.key()));
+        if (it != tally.end() && std::stoi(it->second) == kv.value().get<int>()) tally.erase(it);
+      }
+      ok("✓ Saved the count for " + std::to_string(units.size()) + " item" + (units.size() == 1 ? "" : "s"));
+      inflight.erase("home");
+      load_home();
+    });
+  }
+
   // ---- lists -----------------------------------------------------------------------------------
   bool match(int t, const std::string& s) const {
     if (filter[t].empty()) return true;
@@ -409,7 +450,8 @@ struct Tui {
       case 1: return order.is_object() && order.contains("lines") ? (int)at(order, "lines").size() : 0;
       case 2: return (int)catalogue().size();
       case 3: return (int)new_items().size();
-      default: return (int)past_orders().size();
+      case 4: return (int)past_orders().size();
+      default: return (int)count_rows().size();
     }
   }
   void move(int d) {
@@ -472,6 +514,18 @@ struct Tui {
       if (e == Event::Escape) { err.reset(); return true; }
     }
     if (ed) return editor_key(e);
+    if (tab == 5 && e == Event::Return) { ask_count(); return true; }
+    if (tab == 5 && e == Event::Character('s')) { save_counts(); return true; }
+    if (tab == 5 && (e == Event::Backspace || e == Event::Delete) && cur[5] < (int)count_rows().size()) {
+      tally.erase(at(count_rows()[cur[5]], "item_id").get<int64_t>());
+      return true;
+    }
+    if (e != Event::Character('q') && e != Event::CtrlC) quit_warned = false;
+    else if (!tally.empty() && !quit_warned) {
+      quit_warned = true;
+      ok("● " + std::to_string(tally.size()) + " counts not saved · s on the Count tab saves · q again quits", th::acc);
+      return true;
+    }
 
     if (e == Event::ArrowDown || e == Event::Character('j')) move(1);
     else if (e == Event::ArrowUp || e == Event::Character('k')) move(-1);
@@ -479,9 +533,9 @@ struct Tui {
     else if (e == Event::PageUp) move(-10);
     else if (e == Event::Character('g') || e == Event::Home) move(-100000);
     else if (e == Event::Character('G') || e == Event::End) move(100000);
-    else if (e == Event::Tab) goto_tab((tab + 1) % 5);
-    else if (e == Event::TabReverse) goto_tab((tab + 4) % 5);
-    else if (e.is_character() && e.character() >= "1" && e.character() <= "5" && e.character().size() == 1) goto_tab(e.character()[0] - '1');
+    else if (e == Event::Tab) goto_tab((tab + 1) % 6);
+    else if (e == Event::TabReverse) goto_tab((tab + 5) % 6);
+    else if (e.is_character() && e.character() >= "1" && e.character() <= "6" && e.character().size() == 1) goto_tab(e.character()[0] - '1');
     else if (e == Event::Character('?')) help = true;
     else if (e == Event::Character('r')) { load_tab(); if (tab != 0) load_home(); }
     else if (e == Event::Character('q') || e == Event::CtrlC) navigate(quit);
@@ -584,7 +638,10 @@ struct Tui {
       bool miss = g.value("missing_last_delivery", false), unk = g.value("unknown_pack", false);
       int sug = g.value("suggested", 0);
       if (sug == 0 && !miss && !show_idle) { hidden++; continue; }
+      bool counted = at(g, "usage").is_number();
       std::string note = unk ? "pack unknown · set it in Catalogue" : miss ? "missing from last delivery" :
+                         counted ? "used " + std::to_string(at(g, "usage").get<int>()) + " · has " +
+                                       std::to_string(g.value("on_hand", 0) + g.value("incoming", 0)) + (sug == g.value("admin_min", 0) && sug ? " · admin minimum" : "") :
                          sug > 0 && g.value("units", 0) == 0 ? "admin minimum" : "";
       Color nc = unk ? th::yellow : miss ? th::red : th::dim;
       s.push_back(trow({text(unk ? "▲" : miss ? "✗" : sug ? "●" : "·") | color(unk ? th::yellow : miss ? th::red : th::acc),
@@ -593,6 +650,10 @@ struct Tui {
                         cell(at(g, "pack_size").is_number() ? std::to_string(at(g, "pack_size").get<int>()) : "?", 4, true) | color(unk ? th::yellow : Color::Default),
                         cell(std::to_string(sug), 5, true) | bold | color(th::acc), text(note) | color(nc)}));
     }
+    bool any_count = false;
+    for (auto& g : home.value("suggestions", json::array())) any_count |= at(g, "usage").is_number();
+    if (!any_count && !home.value("suggestions", json::array()).empty())
+      s.push_back(hbox({text(" ▲ no fridge count this cycle: numbers ignore what you already have · ") | color(th::yellow), keycap("6"), text(" Count") | color(th::yellow)}));
     if (hidden) s.push_back(hbox({text(" " + std::to_string(hidden) + " more with no demand · ") | color(th::dim), keycap("h"), text(" show") | color(th::dim)}));
     if (show_idle) s.push_back(hbox({text(" "), keycap("h"), text(" hide items with no demand") | color(th::dim)}));
 
@@ -757,6 +818,36 @@ struct Tui {
     return window(hbox({text(" Past cycles ") | bold, text("· click or ⏎ to open ") | color(th::dim)}), vbox(rows) | vscroll_indicator | yframe | flex) | flex;
   }
 
+  Element count_view() {
+    auto v = count_rows();
+    std::string cs = sstr(home.value("cycle", json::object()), "start");
+    auto num = [](const json& j, const char* k) { return at(j, k).is_number() ? std::to_string(at(j, k).get<int>()) : std::string("—"); };
+    Elements rows = {trow({cell("", 1), cell("Item", 34), cell("Supplier", 8), cell("Pack", 4, true), cell("Last count", 12, true),
+                           cell("Now", 5, true), cell("Used", 5, true), cell("Coming", 6, true), cell("Order", 5, true)}) | color(th::dim)};
+    for (int i = 0; i < (int)v.size(); i++) {
+      const json& g = v[i];
+      bool on = i == cur[5];
+      auto t = tally.find(at(g, "item_id").get<int64_t>());
+      std::string on_date = sstr(g, "counted_on");
+      bool fresh = !on_date.empty() && on_date >= cs;
+      std::string last = on_date.empty() ? "—" : num(g, "on_hand") + " · " + short_date(on_date);
+      auto r = trow({text(on ? "▸" : t != tally.end() ? "●" : fresh ? "✓" : " ") | color(on || t != tally.end() ? th::acc : th::green),
+                     cell(sstr(g, "item"), 34), cell(sstr(g, "supplier"), 8) | color(th::dim),
+                     cell(num(g, "pack_size"), 4, true) | color(at(g, "pack_size").is_null() ? th::yellow : Color::Default),
+                     cell(last, 12, true) | color(fresh ? Color::Default : th::dim),
+                     cell(t != tally.end() ? t->second : "", 5, true) | bold | color(th::acc),
+                     cell(num(g, "usage"), 5, true) | color(th::dim), cell(num(g, "incoming"), 6, true) | color(th::dim),
+                     cell(std::to_string(g.value("suggested", 0)), 5, true) | bold | color(th::acc)});
+      rows.push_back(hit(sel_row(r, on), [this, i] { cur[5] = i; }));
+    }
+    if (v.empty()) rows.push_back(text(home.value("suggestions", json::array()).empty() ? "No items yet: they appear when you import an order." : "Nothing matches.") | color(th::dim));
+    std::string note = tally.empty() ? "✓ nothing unsaved" : "● " + std::to_string(tally.size()) + " unsaved · s saves";
+    return window(hbox({text(" Fridge count ") | bold, text("· units on hand, before you order · items you skip keep their last count ") | color(th::dim)}),
+                  vbox({vbox(rows) | vscroll_indicator | yframe | flex, separatorLight(),
+                        hbox({text(" Used = last count + delivered since − this count · Coming = ordered, not delivered yet") | color(th::dim), filler(),
+                              text(note + " ") | color(tally.empty() ? th::green : th::acc)})})) | flex;
+  }
+
   Element header() {
     auto cy = home.value("cycle", json::object());
     Elements left = {text(" DIONISIO ") | bold | color(th::acc)};
@@ -787,7 +878,7 @@ struct Tui {
 
   Element tabs() {
     Elements t;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
       std::string extra;
       Color ec = th::dim;
       if (i == 2 && loaded.count("catalogue")) { int a = 0; for (auto& it : items) a += it.value("active", true); extra = " " + std::to_string(a); }
@@ -805,8 +896,9 @@ struct Tui {
     std::vector<K> ks;
     if (ed) ks = {{"← →", "−/+"}, {"0-9", "type"}, {"↑↓", "pack/min"}, {"a", "archive"}, {"⏎", "save"}, {"Esc", "cancel"}};
     else if (tab == 1) ks = {{"⏎", "arrived"}, {"⌫", "missing"}, {"p", "pending"}, {"A", "rest arrived"}, {"d l b", "boleto"}, {"s", "save"}, {"Esc", "back"}};
+    else if (tab == 5) ks = {{"⏎", "type units · ⏎ next row"}, {"Esc", "stop"}, {"⌫", "undo row"}, {"s", "save"}, {"/", "filter"}, {"1-6", "tabs"}};
     else if (tab == 2) ks = {{"⏎", "edit"}, {"/", "filter"}, {"u", "unknown pack"}, {"x", "archived"}, {"a", "archive"}, {"?", "help"}};
-    else ks = {{"1-5", "tabs"}, {"↑↓", "move"}, {"⏎", "open"}, {"/", "filter"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}};
+    else ks = {{"1-6", "tabs"}, {"↑↓", "move"}, {"⏎", "open"}, {"/", "filter"}, {"r", "refresh"}, {"?", "help"}, {"q", "quit"}};
     Elements e;
     for (auto& [k, l] : ks) { e.push_back(keycap(k)); e.push_back(text(" " + l + "  ") | color(th::dim)); }
     e.push_back(filler());
@@ -853,11 +945,13 @@ struct Tui {
       return vbox(r);
     };
     return vbox({hbox({text(" ? Help ") | bold, filler(), keycap("?"), text(" or ") | color(th::dim), keycap("Esc"), text(" closes ") | color(th::dim)}), text(""),
-                 hbox({vbox({group("⌂ Everywhere", {{"1-5 Tab", "switch tab (loads in background)"}, {"↑↓ j k", "move · PgUp/PgDn · g/G"}, {"/", "filter the table"}, {"r", "refresh now"}, {"Esc", "cancel loading · clear filter"}, {"q", "quit (asks if unsaved)"}}),
+                 hbox({vbox({group("⌂ Everywhere", {{"1-6 Tab", "switch tab (loads in background)"}, {"↑↓ j k", "move · PgUp/PgDn · g/G"}, {"/", "filter the table"}, {"r", "refresh now"}, {"Esc", "cancel loading · clear filter"}, {"q", "quit (asks if unsaved)"}}),
                               text(""),
                               group("☑ Order", {{"⏎", "mark arrived"}, {"⌫ Del", "mark missing"}, {"p", "back to pending"}, {"A", "every pending line arrived"}, {"d l b", "due · linha · paid on"}, {"s", "save"}})}),
                        text("    "),
                        vbox({group("▤ Catalogue", {{"⏎", "open the item editor"}, {"← →", "pack size −1 / +1"}, {"0-9", "type a value"}, {"↑↓ m", "switch pack / minimum"}, {"a", "archive / restore"}, {"u x", "unknown pack · archived"}}),
+                             text(""),
+                             group("# Count", {{"⏎", "type units, ⏎ goes to the next row"}, {"Esc", "stop typing"}, {"⌫", "undo this row"}, {"s", "save the count"}}),
                              text(""),
                              group("◎ Mouse", {{"click", "tabs, rows, buttons, ✓ ✗ ○"}, {"wheel", "scroll the list"}, {"Shift+drag", "select text to copy"}})})})}) |
            borderStyled(ROUNDED, th::acc) | clear_under | center;
@@ -873,7 +967,8 @@ struct Tui {
     else if (tab == 1) body = order.is_object() || !inflight.count("order") ? order_view() : skeleton();
     else if (tab == 2) body = catalogue_view();
     else if (tab == 3) body = new_items_view();
-    else body = past_view();
+    else if (tab == 4) body = past_view();
+    else body = count_view();
     Elements page = {header(), tabs(), body | flex};
     if (err) page.push_back(err_banner());
     page.push_back(separatorLight());

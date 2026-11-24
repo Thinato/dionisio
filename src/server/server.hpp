@@ -34,6 +34,7 @@ auto db(F&& f) {
   return f();
 }
 void open_db();  // opens g_db_path into g_db and applies the schema (idempotent). Throws on failure.
+void apply_schema();  // also after a reload: an older revision's DB may lack newer tables
 // Run sql with positional params (null/bool/int/string); returns rows as [{col: value}]. Throws on error.
 json q(const std::string& sql, const json& params = json::array());
 template <class F>
