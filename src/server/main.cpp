@@ -267,6 +267,19 @@ int main() {
   httplib::Server svr;
   svr.set_payload_max_length(1 << 20);
   svr.set_pre_routing_handler([](const Request& req, Response& res) {
+    // The Juntos+ page script (tools/juntos-import.js) calls /api/home and /api/items from the browser.
+    static const std::string cors_origin = env("CORS_ORIGIN", "https://br.juntosplus.com");
+    if (!cors_origin.empty() && req.get_header_value("Origin") == cors_origin) {
+      res.set_header("Access-Control-Allow-Origin", cors_origin);
+      res.set_header("Vary", "Origin");
+      if (req.method == "OPTIONS") {
+        res.set_header("Access-Control-Allow-Methods", "GET, POST");
+        res.set_header("Access-Control-Allow-Headers", "Authorization, Content-Type");
+        res.set_header("Access-Control-Max-Age", "86400");
+        res.status = 204;
+        return httplib::Server::HandlerResponse::Handled;
+      }
+    }
     bool guarded = req.path.rfind("/api/", 0) == 0 || req.path.rfind("/jobs/", 0) == 0;
     if (guarded && !token_ok(req)) {
       reply(res, 401, {{"error", "unauthorized"}});

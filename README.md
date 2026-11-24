@@ -34,6 +34,7 @@ Server-only build (what the Dockerfile does): `-DDIONISIO_TUI=OFF`.
 | `GCS_BUCKET` | Empty means local file only |
 | `GCS_ENDPOINT` | Default `https://storage.googleapis.com`; if set, the metadata token is skipped (tests) |
 | `ALLOW_TODAY_OVERRIDE` | `1` honours `?today=` (tests only) |
+| `CORS_ORIGIN` | Default `https://br.juntosplus.com`, the only browser origin allowed to call `/api/*` (for the Juntos+ script). Empty disables CORS |
 
 Persistence: with `GCS_BUCKET` set, the SQLite file is restored from one GCS object at startup and uploaded after every mutating request, with `ifGenerationMatch`. If another writer got there first (deploy overlap), the server reloads the latest copy and answers 503, and the client retries. Each upload is tried once, with no 429 retry (a deviation from the plan): a failed upload answers 503, and the next mutating request, even the client's no-op retry, uploads the pending change. If the restore fails for any reason other than "not found", the server exits instead of starting empty.
 
@@ -46,6 +47,12 @@ export DIONISIO_URL=https://YOUR-RUN-URL DIONISIO_TOKEN=<API_TOKEN>
 ```
 
 Tabs: Home (suggestions, orders, Boletos), Order checklist (Enter = arrived, Backspace/Delete = missing, `p` = pending, `s` or leaving the screen saves), Catalogue (pack size, minimum, active), New items, Past cycles.
+
+## Juntos+ cart import
+
+`tools/juntos-import.js` adds an "Importar do Dionisio" button to br.juntosplus.com. It fills the cart with this cycle's JUNTOS suggestions and then opens the cart, but it never finishes the order. Load it with any extension that injects JavaScript into a page, scoped to `https://br.juntosplus.com/*`, and set `DIONISIO_TOKEN` at the top of the script.
+
+The JUNTOS export has product names but no SKUs, and some products share a name. The script therefore takes the SKU from your Juntos+ order history, where the most recent purchase wins. A name you have never ordered is used only if search finds exactly one product with that name. When Dionisio doesn't know an item's box size, the script converts units to boxes and saves the box size to Dionisio.
 
 ## Slack app
 

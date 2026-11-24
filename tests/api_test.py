@@ -160,6 +160,21 @@ def test_auth(s):
         check(s.call(m, p, body, token="tt")[0] == 401, f"AC7 longer token {m} {p}")
         check(s.call(m, p + "?token=t", body, token=None)[0] == 401, f"AC7 query token {m} {p}")
     check(s.call("GET", "/api/home", token=None, headers={"X-Api-Token": "t"})[0] == 200, "X-Api-Token accepted")
+    def raw(method, origin):
+        req = urllib.request.Request(f"http://127.0.0.1:{s.port}/api/home", method=method,
+                                     headers={"Origin": origin, "Authorization": "Bearer t"})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.headers
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers
+    st, h = raw("OPTIONS", "https://br.juntosplus.com")
+    check(st == 204 and h["Access-Control-Allow-Origin"] == "https://br.juntosplus.com"
+          and "Authorization" in h["Access-Control-Allow-Headers"], "CORS preflight from Juntos+")
+    st, h = raw("GET", "https://br.juntosplus.com")
+    check(st == 200 and h["Access-Control-Allow-Origin"] == "https://br.juntosplus.com", "CORS header on GET")
+    st, h = raw("OPTIONS", "https://evil.example")
+    check(h["Access-Control-Allow-Origin"] is None, "no CORS for other origins")
 
 
 def test_import(s):
@@ -232,7 +247,7 @@ def test_checklist(s, jid, bid):
     check(s.call("GET", "/api/orders/999")[0] == 404, "unknown order 404")
     check(s.call("POST", "/api/orders/999", {})[0] == 404, "unknown order POST 404")
 
-    st, o = s.call("POST", f"/api/orders/{jid}", {"due_date": "2026-11-20", "linha_digitavel": "1234.5678 9"})
+    st, o = s.call("POST", f"/api/orders/{jid}", {"due_date": "2026-11-20", "linha_digitavel": "1234.5678 9"}, today=TODAY)
     check(st == 200 and o["boleto"]["due_date"] == "2026-11-20" and o["boleto"]["linha_digitavel"] == "1234.5678 9",
           "boleto fields set")
     check(not o["boleto"]["overdue"], "not overdue")
