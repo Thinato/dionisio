@@ -108,6 +108,14 @@ int main() {
   s = suggest({{1, "day"}}, std::nullopt, 0);
   CHECK(s.units == 10 && !s.packs && s.suggested == 10);
   CHECK(suggest({}, 6, 1).suggested == 1);
+  // stock: max(demand, usage) - on hand - incoming, in boxes, floored at 0 and at the minimum
+  CHECK(suggest({}, 12, 0, Stock{0, 0, 36}).suggested == 3);
+  CHECK(suggest({}, 4, 0, Stock{2, 0, 18}).suggested == 4);
+  CHECK(suggest({{1, "day"}}, 6, 0, Stock{3, 0, 4}).suggested == 2);  // demand 10 beats usage 4
+  CHECK(suggest({}, 6, 0, Stock{0, 24, 12}).suggested == 0);         // enough already on the way
+  CHECK(suggest({}, 6, 2, Stock{8, 0, 4}).suggested == 2);           // minimum still applies
+  CHECK(suggest({{1, "day"}}, 6, 0, Stock{4, 0, std::nullopt}).suggested == 1);  // no usage: demand only
+  CHECK(suggest({{1, "day"}}, std::nullopt, 0, Stock{4, 0, 20}).suggested == 10);  // pack unknown: unchanged
 
   // dates + cycles
   CHECK(!parse_date("2026-02-30") && !parse_date("2026-1-01") && !parse_date("x") && !parse_date("2026-11-090"));

@@ -83,6 +83,7 @@ static void reload() {
   sqlite3* src = nullptr;
   if (write_file(tmp, r.body) && sqlite3_open_v2(tmp.c_str(), &src, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK &&
       copy_db(src, g_db)) {
+    apply_schema();  // DDL doesn't move total_changes
     g_gen = gen_of(r);
     g_saved = sqlite3_total_changes(g_db);  // local == remote again
     ++g_reloads;

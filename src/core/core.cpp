@@ -122,11 +122,14 @@ int64_t amount_due(int64_t total_cents, const std::vector<LineState>& lines) {
   return started ? arrived_total(lines) : total_cents;
 }
 
-Suggestion suggest(const std::vector<Pref>& prefs, std::optional<int> pack_size, int admin_min_packs) {
+Suggestion suggest(const std::vector<Pref>& prefs, std::optional<int> pack_size, int admin_min_packs,
+                   std::optional<Stock> stock) {
   int units = 0;
   for (const auto& p : prefs) units += p.count * (p.period == "day" ? 10 : 2);
   if (!pack_size || *pack_size <= 0) return {units, std::nullopt, units};
-  int packs = (units + *pack_size - 1) / *pack_size;
+  int need = units;
+  if (stock) need = std::max(0, std::max(units, stock->usage.value_or(0)) - stock->on_hand - stock->incoming);
+  int packs = (need + *pack_size - 1) / *pack_size;
   return {units, packs, std::max(admin_min_packs, packs)};
 }
 
