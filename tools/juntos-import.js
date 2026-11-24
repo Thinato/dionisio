@@ -14,6 +14,12 @@
   if (window.__dionisioImport) return;
   window.__dionisioImport = true;
 
+  // Hide the cookie banner, which asks again on every visit. It forces display/opacity/visibility with
+  // inline !important, so clip it away instead; clicks pass through to the page.
+  const hideCookies = document.createElement('style');
+  hideCookies.textContent = '#privacytools-banner-consent{clip-path:inset(100%)!important;pointer-events:none!important}';
+  (document.head || document.documentElement).append(hideCookies);
+
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const norm = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
   async function until(fn, ms = 10000) {
